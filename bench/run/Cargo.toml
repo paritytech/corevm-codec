@@ -1,0 +1,24 @@
+[package]
+name = "corevm-run"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "A tool to run CoreVM binaries as benchmarks"
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = "1.11.1"
+clap = { workspace = true }
+corevm-engine = { version = "0.1.26", features = ["sim", "std"] }
+corevm-host = { version = "0.1.26", features = ["std"] }
+env_logger.workspace = true
+jam-codec = { workspace = true }
+jam-pvm-common = { version = "0.1.26", default-features = false, features = [] }
+jam-types = "0.1.26"
+log = { workspace = true }
+polkavm = { version = "0.29.0", features = ["std"] }
+
+[lints]
+workspace = true
