@@ -74,6 +74,7 @@ struct SumUv {
     count: u8,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn rgb888_to_yuv420p(
     frame: &[u8],
     width: u16,
