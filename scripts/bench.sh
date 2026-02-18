@@ -23,6 +23,7 @@ EOF
 }
 
 riscv() {
+    rustup component add rust-src --toolchain "$rust_version"-x86_64-unknown-linux-gnu
 	printf "Architecture: RISCV\n" >&2
 	printf "CoreVM codec\n" >&2
 	riscv_build_and_run --no-default-features --features corevm
@@ -67,7 +68,6 @@ corevm_build() {
 	output_file=target/"$rust_target"/"$profile"/"$package".corevm
 	oldpwd="$PWD"
 	cd "$oldpwd"
-    rustup component add rust-src --toolchain "$rust_version"-x86_64-unknown-linux-gnu || true
 	env RUSTC_BOOTSTRAP=1 \
 		RUSTUP_TOOLCHAIN="$rust_version" \
 		cargo build \
