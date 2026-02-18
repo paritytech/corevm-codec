@@ -19,5 +19,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.1.4
+      - name: Enable unprivileged userfaultfd
+        run: echo 1 | sudo tee /proc/sys/vm/unprivileged_userfaultfd
+      - name: Enable unprivileged user namespaces
+        run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
       - name: Run benchmarks (CoreVM)
         run: ./ci/bench.sh
