@@ -23,5 +23,6 @@ jobs:
         run: echo 1 | sudo tee /proc/sys/vm/unprivileged_userfaultfd
       - name: Enable unprivileged user namespaces
         run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
-      - name: Run benchmarks (CoreVM)
+      - name: Install Rust toolchain
+      - name: rustup default 1.91.0-x86_64-unknown-linux-gnu
         run: ./ci/bench.sh
