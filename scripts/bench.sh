@@ -3,6 +3,7 @@
 profile=release
 rust_target=riscv64emac-corevm-linux-musl
 rust_stack_size=8388608
+rust_version=1.90.0
 
 main() {
 	set -e
@@ -66,8 +67,9 @@ corevm_build() {
 	output_file=target/"$rust_target"/"$profile"/"$package".corevm
 	oldpwd="$PWD"
 	cd "$oldpwd"
+    rustup component add rust-src --toolchain "$rust_version"-x86_64-unknown-linux-gnu || true
 	env RUSTC_BOOTSTRAP=1 \
-		RUSTUP_TOOLCHAIN=1.90.0 \
+		RUSTUP_TOOLCHAIN="$rust_version" \
 		cargo build \
 		"$@" \
 		--target="$POLKAPORTS_SYSROOT"/"$rust_target".json \
