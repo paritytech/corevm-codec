@@ -25,7 +25,7 @@ proptest = "1.9.0"
 
 [workspace]
 resolver = "2"
-members = [".", "tool", "bench", "bench/run"]
+members = [".", "tool", "bench", "bench/run", "wasm"]
 default-members = ["."]
 
 [workspace.package]
@@ -46,7 +46,11 @@ log = "0.4.29"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 
+# This is WASM-specific configuration.
+# Also used in RISCV benchmarks.
 [profile.release]
 panic = "abort"
 lto = true
 codegen-units = 1
+debug = false
+strip = true
