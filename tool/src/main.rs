@@ -44,6 +44,8 @@ enum InputFormat {
     Corevm,
     /// Raw Quake frames (indexed RGB888).
     Quake,
+    /// Raw RGB888 frames.
+    Rgb888,
 }
 
 #[derive(ValueEnum, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,9 @@ fn do_main() -> anyhow::Result<()> {
         (I::Quake, O::Corevm) => corevm::from_quake(args),
         (I::Quake, O::Rgb888) => quake::to_rgb888(args),
         (I::Corevm, O::Rgb888) => corevm::to_rgb888(args),
-        (I::Corevm, O::Corevm) => Err(anyhow!("Can't transcode to the same format")),
+        (I::Rgb888, O::Corevm) => corevm::from_rgb888(args),
+        (I::Corevm, O::Corevm) | (I::Rgb888, O::Rgb888) => {
+            Err(anyhow!("Can't transcode to the same format"))
+        }
     }
 }

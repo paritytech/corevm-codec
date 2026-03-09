@@ -95,21 +95,71 @@ pub fn from_quake(
             );
         }
     }
-    if num_frames != 0 {
-        let mut block = Vec::new();
-        let t = Instant::now();
-        encoder.finish(&mut block);
-        t_corevm += t.elapsed();
-        eprintln!("\n# Total");
-        eprint!(
-            "{}",
-            DisplayStats {
-                stats: &overall_stats,
-                num_bytes_read
-            }
-        );
-        eprintln!("Encoding time: {:.9}", t_corevm.as_secs_f64());
+    let mut block = Vec::new();
+    let t = Instant::now();
+    encoder.finish(&mut block);
+    t_corevm += t.elapsed();
+    eprintln!("\n# Total");
+    eprint!(
+        "{}",
+        DisplayStats {
+            stats: &overall_stats,
+            num_bytes_read
+        }
+    );
+    eprintln!("Encoding time: {:.9}", t_corevm.as_secs_f64());
+    Ok(())
+}
+
+pub fn from_rgb888(
+    Args {
+        width,
+        height,
+        max_frames,
+        quantization_level,
+        ..
+    }: Args,
+) -> anyhow::Result<()> {
+    let mut config = video::Config::default();
+    config.quantization_level = quantization_level;
+    let mut encoder = video::Encoder::new(width, height, config);
+    {
+        let mut buf = Vec::new();
+        encoder.start(&mut buf);
+        std::io::stdout().write_all(&buf)?;
     }
+    let frame_len = usize::from(width.get()) * usize::from(height.get()) * 3;
+    let mut reader = BufReader::new(std::io::stdin());
+    let mut total_frames: u32 = 0;
+    let mut last_reported = Instant::now();
+    let mut last_total_frames: u32 = 0;
+    let mut frame = vec![0_u8; frame_len];
+    let mut overall_stats = video::Stats::default();
+    loop {
+        if Some(total_frames) == max_frames.map(|x| x.get()) {
+            break;
+        }
+        match reader.read_exact(&mut frame[..]) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let mut block = Vec::new();
+        let stats = encoder.write_rgb888_frame(&frame, &mut block);
+        std::io::stdout().write_all(&block)?;
+        overall_stats += &stats;
+        total_frames += 1;
+        let now = Instant::now();
+        let dt = now.duration_since(last_reported);
+        if dt > Duration::from_secs(1) {
+            let fps = (total_frames - last_total_frames) as f64 / dt.as_secs_f64();
+            log::info!("Processed {total_frames} frames, {fps:.2} frame(s)/s");
+            last_reported = now;
+            last_total_frames = total_frames;
+        }
+    }
+    let mut block = Vec::new();
+    encoder.finish(&mut block);
     Ok(())
 }
 

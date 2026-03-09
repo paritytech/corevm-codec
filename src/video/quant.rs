@@ -6,6 +6,9 @@ pub const MAX_TRANSFORM_LEVEL: u8 = 10;
 /// How many least significant bits can be removed.
 pub const MAX_QUANTIZATION_LEVEL: u8 = 14;
 
+/// How many bits are needed to store [`MAX_QUANTIZATION_LEVEL`].
+pub const QUANTIZATION_LEVEL_BITS: u8 = 4;
+
 /// Quantize signed integer using the provided quantization level `q`.
 ///
 /// The integer is divided by _2^q_.
@@ -87,5 +90,13 @@ mod tests {
                 assert_eq!(dequantize_naive(x, q), dequantize(x, q), "x = {x}, q = {q}");
             }
         }
+    }
+
+    #[test]
+    fn max_quantization_level_bits() {
+        assert_eq!(
+            u8::BITS - u32::from(QUANTIZATION_LEVEL_BITS),
+            MAX_QUANTIZATION_LEVEL.leading_zeros()
+        );
     }
 }
