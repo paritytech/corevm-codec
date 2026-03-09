@@ -22,6 +22,7 @@ polkaports_install() {
 	git clone --recurse-submodules https://github.com/paritytech/polkaports "$workdir"/polkaports
 	cd "$workdir"/polkaports
 	env CC=clang-20 \
+        CXX=clang++-20 \
 		LD=clang-20 \
 		LLD=lld-20 \
 		AR=llvm-ar-20 \
