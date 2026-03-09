@@ -14,8 +14,10 @@ main() {
 wasm_build() {
 	cd wasm
 	rm -rf pkg
-	wasm-pack build --release --out-name corevm_codec
+	wasm-pack build --release --out-name corevm_codec --no-typescript
 	node js/scaffolding.js
+	tsc pkg/*.js --declaration --allowJs --emitDeclarationOnly --outDir pkg
+	typedoc
 	cd ..
 }
 

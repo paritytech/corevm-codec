@@ -11,7 +11,10 @@ jobs:
         run: |
           sudo -n apt-get -qq update
           sudo -n apt-get -qq install -y nasm
-          npm install -g wasm-pack
+          npm install -g wasm-pack typedoc typescript
+      - name: Install NodeJS
+        uses: actions/setup-node@v4
+      - run: node --version
       - name: Run tests
         run: ./ci/test.sh
   bench:
