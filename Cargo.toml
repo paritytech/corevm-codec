@@ -18,7 +18,7 @@ stats = []
 workspace = true
 
 [dependencies]
-jam-codec = { workspace = true }
+jam-codec = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.9.0"
@@ -33,12 +33,12 @@ authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2021"
 repository = "https://github.com/paritytech/corevm-codec.git"
 license = "Apache-2.0"
-version = "0.1.0"
+version = "0.2.0"
 
 [workspace.dependencies]
 anyhow = "1.0.101"
 clap = { version = "4.5.59", features = ["derive"] }
-corevm-codec = { path = ".", version = "0.1.0" }
+corevm-codec = { path = ".", version = "0.2.0" }
 env_logger = "0.11.9"
 jam-codec = { version = "0.1.1", default-features = false }
 log = "0.4.29"
@@ -53,4 +53,3 @@ panic = "abort"
 lto = true
 codegen-units = 1
 debug = false
-strip = true

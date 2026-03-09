@@ -11,6 +11,7 @@ jobs:
         run: |
           sudo -n apt-get -qq update
           sudo -n apt-get -qq install -y nasm
+          npm install -g wasm-pack
       - name: Run tests
         run: ./ci/test.sh
   bench:

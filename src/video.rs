@@ -1,6 +1,6 @@
 //! Video codec.
 
-use crate::{errors, rans, timer_finish, timer_start, Input, Output, ToUsize};
+use crate::{errors, rans, timer_finish, timer_start, Input, Output};
 use alloc::{vec, vec::Vec};
 use core::num::NonZero;
 use jam_codec::{Compact, Decode, Encode};
@@ -15,51 +15,6 @@ mod yuv;
 pub use self::stats::*;
 use self::{quant::*, yuv::*};
 
-#[derive(Clone)]
-struct Yuv420pFrame {
-    data: Vec<i16>,
-    y_len: u32,
-    uv_len: u32,
-    uv_width: NonZero<u16>,
-    uv_height: NonZero<u16>,
-}
-
-impl Yuv420pFrame {
-    fn new(width: NonZero<u16>, height: NonZero<u16>) -> Self {
-        let (y_len, uv_len, uv_width, uv_height) = yuv420p_dimensions(width, height);
-        let data = vec![0; y_len.to_usize() + 2 * uv_len.to_usize()];
-        Self {
-            data,
-            y_len,
-            uv_len,
-            uv_width,
-            uv_height,
-        }
-    }
-
-    /// Returns _Y_, _U_, _V_ as mutable slices.
-    fn as_mut_slices(&mut self) -> (&mut [i16], &mut [i16], &mut [i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from `self.y_len` and
-        // `self.uv_len`.
-        unsafe {
-            let (y, uv) = self.data.split_at_mut_unchecked(self.y_len.to_usize());
-            let (u, v) = uv.split_at_mut_unchecked(self.uv_len.to_usize());
-            (y, u, v)
-        }
-    }
-
-    /// Returns _Y_, _U_, _V_ as slices.
-    fn as_slices(&mut self) -> (&[i16], &[i16], &[i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from `self.y_len` and
-        // `self.uv_len`.
-        unsafe {
-            let (y, uv) = self.data.split_at_unchecked(self.y_len.to_usize());
-            let (u, v) = uv.split_at_unchecked(self.uv_len.to_usize());
-            (y, u, v)
-        }
-    }
-}
-
 /// Video encoder configuration.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -69,14 +24,53 @@ pub struct Config {
     /// Typical value is 3-4, maximum is 14.
     /// Low values might increase the input size instead of decreasing.
     pub quantization_level: u8,
+    /// Enable 4:2:0 chroma subsampling.
+    pub chroma_subsampling: bool,
+    /// Enable raw mode.
+    ///
+    /// In this mode no encoding is done, input frames are simply copied into
+    /// the output instead.
+    ///
+    /// This mode is useful running the code under a RISCV interpreter.
+    ///
+    /// Other configuration options have no effect when raw mode is enabled.
+    pub raw: bool,
+}
+
+impl Config {
+    /// Returns default lossless configuration.
+    pub fn default_lossless() -> Self {
+        Self {
+            quantization_level: 0,
+            chroma_subsampling: false,
+            raw: false,
+        }
+    }
+
+    /// Returns default raw mode configuration.
+    pub fn default_raw() -> Self {
+        Self {
+            quantization_level: 0,
+            chroma_subsampling: false,
+            raw: true,
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             quantization_level: 4,
+            chroma_subsampling: true,
+            raw: false,
         }
     }
+}
+
+#[derive(Debug, Encode, Decode)]
+enum RawVideoFrameFormat {
+    Rgb888 = 0,
+    Rgb888Indexed8 = 1,
 }
 
 /// Video encoder.
@@ -118,10 +112,11 @@ pub struct Encoder {
     width: NonZero<u16>,
     height: NonZero<u16>,
     quant: u8,
+    raw: bool,
     // Current frame.
-    frame: Yuv420pFrame,
+    frame: YuvFrame,
     // Previous frame.
-    prev_frame: Yuv420pFrame,
+    prev_frame: YuvFrame,
     // Output buffer.
     buf: Vec<u8>,
 }
@@ -130,9 +125,10 @@ impl Encoder {
     /// Creates new encoder with the provided width, height, and configuration.
     pub fn new(width: NonZero<u16>, height: NonZero<u16>, config: Config) -> Self {
         let quant = config.quantization_level.min(MAX_QUANTIZATION_LEVEL);
-        let frame = Yuv420pFrame::new(width, height);
+        let frame = YuvFrame::new(width, height, config.chroma_subsampling);
         let prev_frame = frame.clone();
         let buf = Vec::with_capacity(32 * 1024);
+        let raw = config.raw;
         Self {
             width,
             height,
@@ -140,22 +136,68 @@ impl Encoder {
             frame,
             prev_frame,
             buf,
+            raw,
         }
     }
 
     /// Encode RGB888 frame and append the resulting bytes to the output.
-    pub fn write_rgb888_frame(&mut self, frame: &[u8], output: &mut impl Output) -> Stats {
+    pub fn write_rgb888_frame(&mut self, rgb_frame: &[u8], output: &mut impl Output) -> Stats {
         assert_eq!(
             usize::from(self.width.get()) * usize::from(self.height.get()) * 3,
-            frame.len()
+            rgb_frame.len()
         );
-        let (y, u, v) = self.frame.as_mut_slices();
-        rgb888_to_yuv420p(frame, self.width, y, u, v);
+        if self.raw {
+            RawVideoFrameFormat::Rgb888.encode_to(output);
+            output.write(rgb_frame);
+            return Stats::default();
+        }
+        match self.frame {
+            YuvFrame::Yuv420p(ref mut frame) => {
+                let (y, u, v) = frame.as_mut_slices();
+                rgb888_to_yuv420p(rgb_frame, self.width, y, u, v);
+            }
+            YuvFrame::Yuv444p(ref mut frame) => {
+                let (y, u, v) = frame.as_mut_slices();
+                rgb888_to_yuv444p(rgb_frame, self.width, y, u, v);
+            }
+        }
+        self.write_frame(output)
+    }
+
+    /// Encode indexed RGB888 frame and append the resulting bytes to the
+    /// output.
+    ///
+    /// The frame consists of a 256-color palette and an array of 8-bit indices
+    /// into the palette. Each palette element is encoded as RGB888.
+    pub fn write_rgb888_indexed8_frame(
+        &mut self,
+        indexed_rgb_frame: &[u8],
+        output: &mut impl Output,
+    ) -> Stats {
+        assert_eq!(
+            usize::from(self.width.get()) * usize::from(self.height.get()) + 3 * 256,
+            indexed_rgb_frame.len()
+        );
+        if self.raw {
+            RawVideoFrameFormat::Rgb888Indexed8.encode_to(output);
+            output.write(indexed_rgb_frame);
+            return Stats::default();
+        }
+        match self.frame {
+            YuvFrame::Yuv420p(ref mut frame) => {
+                let (y, u, v) = frame.as_mut_slices();
+                rgb888_indexed8_to_yuv420p(indexed_rgb_frame, self.width, y, u, v);
+            }
+            YuvFrame::Yuv444p(ref mut frame) => {
+                let (y, u, v) = frame.as_mut_slices();
+                rgb888_indexed8_to_yuv444p(indexed_rgb_frame, self.width, y, u, v);
+            }
+        }
         self.write_frame(output)
     }
 
     fn write_frame(&mut self, output: &mut impl Output) -> Stats {
-        let (uv_width, uv_height) = (self.frame.uv_width, self.frame.uv_height);
+        let (uv_width, uv_height) = (self.frame.uv_width(), self.frame.uv_height());
         let (y, u, v) = self.frame.as_mut_slices();
         let t_transform = timer_start!();
         haar::forward(y, self.width, self.height, self.quant);
@@ -197,7 +239,18 @@ impl Encoder {
     pub fn start(&mut self, output: &mut impl Output) {
         Compact(self.width.get()).encode_to(output);
         Compact(self.height.get()).encode_to(output);
-        self.quant.encode_to(output);
+        let chroma_subsampling = match self.frame {
+            YuvFrame::Yuv420p(..) => 1_u8,
+            YuvFrame::Yuv444p(..) => 0_u8,
+        };
+        let raw = match self.raw {
+            true => 1_u8,
+            false => 0_u8,
+        };
+        let config = self.quant
+            | (chroma_subsampling << QUANTIZATION_LEVEL_BITS)
+            | (raw << (QUANTIZATION_LEVEL_BITS + 1));
+        config.encode_to(output);
     }
 
     /// Write stream footer.
@@ -224,13 +277,21 @@ impl From<signmag::InvalidSignMagStream> for InvalidVideoStream {
     }
 }
 
+#[doc(hidden)]
+impl From<jam_codec::Error> for InvalidVideoStream {
+    fn from(_: jam_codec::Error) -> Self {
+        InvalidVideoStream
+    }
+}
+
 /// Video decoder.
 pub struct Decoder {
     width: NonZero<u16>,
     height: NonZero<u16>,
     quant: u8,
-    frame: Yuv420pFrame,
-    prev_frame: Yuv420pFrame,
+    raw: bool,
+    frame: YuvFrame,
+    prev_frame: YuvFrame,
 }
 
 impl Decoder {
@@ -238,18 +299,30 @@ impl Decoder {
     pub fn new(input: &mut impl Input) -> Result<Self, InvalidVideoStream> {
         let Compact(width) = Compact::<u16>::decode(input).map_err(|_| InvalidVideoStream)?;
         let Compact(height) = Compact::<u16>::decode(input).map_err(|_| InvalidVideoStream)?;
-        let quant = u8::decode(input).map_err(|_| InvalidVideoStream)?;
+        let config = u8::decode(input).map_err(|_| InvalidVideoStream)?;
+        let quant = config & 0b1111;
         if quant > MAX_QUANTIZATION_LEVEL {
             return Err(InvalidVideoStream);
         }
+        let chroma_subsampling = match (config >> QUANTIZATION_LEVEL_BITS) & 1 {
+            0 => false,
+            1 => true,
+            _ => return Err(InvalidVideoStream),
+        };
+        let raw = match (config >> (QUANTIZATION_LEVEL_BITS + 1)) & 1 {
+            0 => false,
+            1 => true,
+            _ => return Err(InvalidVideoStream),
+        };
         let width = NonZero::new(width).ok_or(InvalidVideoStream)?;
         let height = NonZero::new(height).ok_or(InvalidVideoStream)?;
-        let frame = Yuv420pFrame::new(width, height);
+        let frame = YuvFrame::new(width, height, chroma_subsampling);
         let prev_frame = frame.clone();
         Ok(Self {
             width,
             height,
             quant,
+            raw,
             frame,
             prev_frame,
         })
@@ -265,24 +338,122 @@ impl Decoder {
         self.height
     }
 
-    /// Decode RGB888 frame.
+    /// Decode next frame as RGB888.
     pub fn read_rgb888_frame(
         &mut self,
         input: &mut impl Input,
-        frame: &mut [u8],
+        rgb_frame: &mut [u8],
     ) -> Result<(), InvalidVideoStream> {
         assert_eq!(
             usize::from(self.width.get()) * usize::from(self.height.get()) * 3,
-            frame.len()
+            rgb_frame.len()
         );
+        if self.raw {
+            return self.read_rgb888_frame_raw(input, rgb_frame);
+        }
         self.read_yuv420p_frame(input)?;
-        let (y, u, v) = self.frame.as_slices();
-        yuv420p_to_rgb888(y, u, v, self.width, frame);
+        match self.frame {
+            YuvFrame::Yuv420p(ref frame) => {
+                let (y, u, v) = frame.as_slices();
+                yuv420p_to_rgb888(y, u, v, self.width, rgb_frame);
+            }
+            YuvFrame::Yuv444p(ref frame) => {
+                let (y, u, v) = frame.as_slices();
+                yuv444p_to_rgb888(y, u, v, self.width, rgb_frame);
+            }
+        }
+        Ok(())
+    }
+
+    fn read_rgb888_frame_raw(
+        &mut self,
+        input: &mut impl Input,
+        rgb_frame: &mut [u8],
+    ) -> Result<(), InvalidVideoStream> {
+        let format = RawVideoFrameFormat::decode(input)?;
+        match format {
+            RawVideoFrameFormat::Rgb888Indexed8 => {
+                let palette_len = 256 * 3;
+                let indices_len = usize::from(self.width.get()) * usize::from(self.height.get());
+                let mut indexed_rgb = vec![0_u8; palette_len + indices_len];
+                input.read(&mut indexed_rgb[..])?;
+                let (palette, indices) = indexed_rgb.split_at(palette_len);
+                for (i, rgb) in indices.iter().copied().zip(rgb_frame.chunks_exact_mut(3)) {
+                    let j = 3 * i as usize;
+                    rgb.copy_from_slice(&palette[j..j + 3]);
+                }
+            }
+            RawVideoFrameFormat::Rgb888 => input.read(rgb_frame)?,
+        }
+        Ok(())
+    }
+
+    /// Decode next frame as RGBA8888.
+    ///
+    /// All pixels are fully opaque.
+    pub fn read_rgba8888_frame(
+        &mut self,
+        input: &mut impl Input,
+        rgba_frame: &mut [u8],
+    ) -> Result<(), InvalidVideoStream> {
+        assert_eq!(
+            usize::from(self.width.get()) * usize::from(self.height.get()) * 4,
+            rgba_frame.len()
+        );
+        if self.raw {
+            return self.read_rgba8888_frame_raw(input, rgba_frame);
+        }
+        self.read_yuv420p_frame(input)?;
+        match self.frame {
+            YuvFrame::Yuv420p(ref frame) => {
+                let (y, u, v) = frame.as_slices();
+                yuv420p_to_rgba8888(y, u, v, self.width, rgba_frame);
+            }
+            YuvFrame::Yuv444p(ref frame) => {
+                let (y, u, v) = frame.as_slices();
+                yuv444p_to_rgba8888(y, u, v, self.width, rgba_frame);
+            }
+        }
+        Ok(())
+    }
+
+    fn read_rgba8888_frame_raw(
+        &mut self,
+        input: &mut impl Input,
+        rgba_frame: &mut [u8],
+    ) -> Result<(), InvalidVideoStream> {
+        let format = RawVideoFrameFormat::decode(input)?;
+        match format {
+            RawVideoFrameFormat::Rgb888Indexed8 => {
+                let palette_len = 256 * 3;
+                let indices_len = usize::from(self.width.get()) * usize::from(self.height.get());
+                let mut indexed_rgb = vec![0_u8; palette_len + indices_len];
+                input.read(&mut indexed_rgb[..])?;
+                let (palette, indices) = indexed_rgb.split_at(palette_len);
+                for (i, rgba) in indices.iter().copied().zip(rgba_frame.chunks_exact_mut(4)) {
+                    let j = 3 * i as usize;
+                    rgba[..3].copy_from_slice(&palette[j..j + 3]);
+                    rgba[3] = u8::MAX;
+                }
+            }
+            RawVideoFrameFormat::Rgb888 => {
+                let rgb_len = 3 * usize::from(self.width.get()) * usize::from(self.height.get());
+                let mut rgb_frame = vec![0_u8; rgb_len];
+                input.read(&mut rgb_frame[..])?;
+                for (rgb, rgba) in rgb_frame
+                    .chunks_exact(3)
+                    .zip(rgba_frame.chunks_exact_mut(4))
+                {
+                    rgba[..3].copy_from_slice(rgb);
+                    rgba[3] = u8::MAX;
+                }
+            }
+        }
         Ok(())
     }
 
     fn read_yuv420p_frame(&mut self, input: &mut impl Input) -> Result<(), InvalidVideoStream> {
-        let (uv_width, uv_height) = (self.frame.uv_width, self.frame.uv_height);
+        let (uv_width, uv_height) = (self.frame.uv_width(), self.frame.uv_height());
         let (y, u, v) = self.frame.as_mut_slices();
         let (y_prev, u_prev, v_prev) = self.prev_frame.as_mut_slices();
         // Read in reverse order: v, u, y.
@@ -418,6 +589,67 @@ mod tests {
                 assert_eq!(y, decoded_y);
                 assert_eq!(u, decoded_u);
                 assert_eq!(v, decoded_v);
+            }
+        });
+    }
+
+    fn rgb_frames(
+        width: RangeInclusive<u16>,
+        height: RangeInclusive<u16>,
+        num_frames: RangeInclusive<u32>,
+    ) -> impl Strategy<Value = (u16, u16, Vec<Vec<u8>>)> {
+        (width, height, num_frames).prop_flat_map(|(width, height, num_frames)| {
+            (
+                width..=width,
+                height..=height,
+                vec![
+                    collection::vec(any::<u8>(), usize::from(width) * usize::from(height) * 3);
+                    num_frames.to_usize()
+                ],
+            )
+        })
+    }
+
+    #[test]
+    fn encoder_lossless_works() {
+        proptest!(|((width, height, frames) in rgb_frames(1..=10, 1..=10, 1..=3))| {
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let mut output = Vec::new();
+            let mut encoder = Encoder::new(width, height, Config::default_lossless());
+            encoder.start(&mut output);
+            for frame in frames.iter() {
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            encoder.finish(&mut output);
+            let mut decoder_input = &output[..];
+            let mut decoder = Decoder::new(&mut decoder_input).unwrap();
+            for frame in frames {
+                let mut decoded_frame = vec![0_u8; usize::from(width.get()) * usize::from(height.get()) * 3];
+                decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
+                assert_eq!(frame, decoded_frame);
+            }
+        });
+    }
+
+    #[test]
+    fn encoder_raw_works() {
+        proptest!(|((width, height, frames) in rgb_frames(1..=10, 1..=10, 1..=3))| {
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let mut output = Vec::new();
+            let mut encoder = Encoder::new(width, height, Config::default_raw());
+            encoder.start(&mut output);
+            for frame in frames.iter() {
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            encoder.finish(&mut output);
+            let mut decoder_input = &output[..];
+            let mut decoder = Decoder::new(&mut decoder_input).unwrap();
+            for frame in frames {
+                let mut decoded_frame = vec![0_u8; usize::from(width.get()) * usize::from(height.get()) * 3];
+                decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
+                assert_eq!(frame, decoded_frame);
             }
         });
     }

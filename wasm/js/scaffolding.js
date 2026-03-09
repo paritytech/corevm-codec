@@ -38,6 +38,7 @@ async function patchPackageJson() {
     files.add('code.wasm')
     files.delete('corevm_codec_bg.wasm')
     package_json.files = Array.from(files)
+    package_json.name = 'corevm-codec'
     await fs.promises.writeFile('pkg/package.json', JSON.stringify(package_json, null, 2))
 }
 

@@ -1,16 +1,14 @@
-use corevm_codec::video::InvalidVideoStream;
+use crate::ToUsize;
+use corevm_codec::VecInput;
+use js_sys::Error;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
-pub struct Error(#[allow(unused)] JsValue);
-
-impl From<InvalidVideoStream> for Error {
-    fn from(_: InvalidVideoStream) -> Self {
-        Self(JsValue::from_str("Invalid video stream"))
-    }
+fn invalid_video_stream() -> Error {
+    Error::new("Invalid video stream")
 }
 
+/// Video decoder.
 #[wasm_bindgen]
 pub struct VideoDecoder {
     decoder: corevm_codec::video::Decoder,
@@ -19,52 +17,48 @@ pub struct VideoDecoder {
 
 #[wasm_bindgen]
 impl VideoDecoder {
+    /// Creates new video decoder using the provided byte array as the input.
     #[wasm_bindgen(constructor)]
-    pub fn new(input: Vec<u8>) -> Result<Self, Error> {
-        let mut input = VecInput {
-            buf: input,
-            offset: 0,
-        };
-        let decoder = corevm_codec::video::Decoder::new(&mut input)?;
+    pub fn new(input: Uint8Array) -> Result<Self, Error> {
+        let buf = input.to_vec();
+        let mut input = VecInput::new(buf);
+        let decoder =
+            corevm_codec::video::Decoder::new(&mut input).map_err(|_| invalid_video_stream())?;
         Ok(Self { decoder, input })
     }
 
+    /// Returns video frame width.
     #[wasm_bindgen(getter)]
     pub fn width(&self) -> u16 {
         self.decoder.width().get()
     }
 
+    /// Returns video frame height.
     #[wasm_bindgen(getter)]
     pub fn height(&self) -> u16 {
         self.decoder.height().get()
     }
 
+    /// Returns `true` if the input contains more frames.
+    #[wasm_bindgen(js_name = "hasMoreFrames")]
+    pub fn has_more_frames(&self) -> bool {
+        !self.input.is_empty()
+    }
+
+    /// Decode next frame as RGBA8888.
+    ///
+    /// Returns decoded frame as `Uint8Array`. Throws an error if there are no
+    /// more frames in the input.
+    ///
+    /// All pixels are fully opaque.
     #[wasm_bindgen(js_name = "readFrame")]
     pub fn read_frame(&mut self) -> Result<Uint8Array, Error> {
-        let frame_len =
-            u32::from(self.decoder.width().get()) * u32::from(self.decoder.height().get()) * 3;
-        let mut frame = vec![0_u8; frame_len as usize];
+        let len = u32::from(self.decoder.width().get()) * u32::from(self.decoder.height().get());
+        let frame_len = 4_u32.checked_mul(len).ok_or_else(invalid_video_stream)?;
+        let mut frame = vec![0_u8; frame_len.to_usize()];
         self.decoder
-            .read_rgb888_frame(&mut self.input, &mut frame[..])?;
+            .read_rgba8888_frame(&mut self.input, &mut frame[..])
+            .map_err(|_| invalid_video_stream())?;
         Ok(Uint8Array::new_from_slice(&frame[..]))
-    }
-}
-
-struct VecInput {
-    buf: Vec<u8>,
-    offset: usize,
-}
-
-impl jam_codec::Input for VecInput {
-    fn remaining_len(&mut self) -> Result<Option<usize>, jam_codec::Error> {
-        Ok(Some(self.buf.len() - self.offset))
-    }
-
-    fn read(&mut self, buf: &mut [u8]) -> Result<(), jam_codec::Error> {
-        let len = buf.len();
-        let slice = &self.buf.get(..len).ok_or("Buffer overflow")?;
-        buf.copy_from_slice(slice);
-        self.offset += len;
-        Ok(())
     }
 }
