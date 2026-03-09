@@ -1,0 +1,24 @@
+---
+name: GH pages
+on:
+  push:
+    branches: [master]
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        # https://drager.github.io/wasm-pack/installer/
+      - name: Install wasm-pack
+        run: npm install -g wasm-pack typedoc typescript
+        # https://docs.github.com/en/actions/tutorials/build-and-test-code/nodejs 
+      - name: Install NodeJS
+        uses: actions/setup-node@v4
+      - run: node --version
+      - name: Generate GH pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./ci/gh-pages.sh

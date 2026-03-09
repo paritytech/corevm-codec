@@ -1,0 +1,55 @@
+[package]
+name = "corevm-codec"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "CoreVM codec collection. Used to encode and decode output streams produced by the guest."
+publish = true
+
+[features]
+std = ["jam-codec/std"]
+# Calculate additional statistics when encoding (e.g. the size of each rANS stream).
+# Mostly useful for development.
+stats = []
+
+[lints]
+workspace = true
+
+[dependencies]
+jam-codec = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1.9.0"
+
+[workspace]
+resolver = "2"
+members = [".", "tool", "bench", "bench/run", "wasm"]
+default-members = ["."]
+
+[workspace.package]
+authors = ["Parity Technologies <admin@parity.io>"]
+edition = "2021"
+repository = "https://github.com/paritytech/corevm-codec.git"
+license = "Apache-2.0"
+version = "0.2.0"
+
+[workspace.dependencies]
+anyhow = "1.0.101"
+clap = { version = "4.5.59", features = ["derive"] }
+corevm-codec = { path = ".", version = "0.2.0" }
+env_logger = "0.11.9"
+jam-codec = { version = "0.1.1", default-features = false }
+log = "0.4.29"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+# This is WASM-specific configuration.
+# Also used in RISCV benchmarks.
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = false

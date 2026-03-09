@@ -1,0 +1,20 @@
+[package]
+name = "corevm-codec-tool"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "CoreVM codec tool"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+corevm-codec = { workspace = true, features = ["std", "stats"] }
+env_logger = { workspace = true }
+jam-codec = { workspace = true, features = ["std"] }
+log = { workspace = true }
