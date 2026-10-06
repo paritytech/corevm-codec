@@ -21,7 +21,7 @@ impl YuvFrame {
         raw: bool,
     ) -> Self {
         if raw {
-            return Self::Dummy(DummyFrame::new(width, height, chroma_subsampling));
+            return Self::Dummy(DummyFrame::new(chroma_subsampling));
         }
         if chroma_subsampling {
             Self::Yuv420p(Yuv420pFrame::new(width, height))
@@ -43,7 +43,7 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(frame) => frame.uv_width(),
             Self::Yuv444p(frame) => frame.width(),
-            Self::Dummy(frame) => frame.width(),
+            Self::Dummy(..) => unreachable!(),
         }
     }
 
@@ -51,7 +51,7 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(frame) => frame.uv_height(),
             Self::Yuv444p(frame) => frame.height(),
-            Self::Dummy(frame) => frame.height(),
+            Self::Dummy(..) => unreachable!(),
         }
     }
 
@@ -60,6 +60,14 @@ impl YuvFrame {
             Self::Yuv420p(..) => true,
             Self::Yuv444p(..) => false,
             Self::Dummy(frame) => frame.chroma_subsampling(),
+        }
+    }
+
+    pub fn raw(&self) -> bool {
+        match self {
+            Self::Yuv420p(..) => false,
+            Self::Yuv444p(..) => false,
+            Self::Dummy(..) => true,
         }
     }
 }
