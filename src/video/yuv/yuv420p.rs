@@ -2,10 +2,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZero;
 
+use super::NUM_RGB_COMPONENTS;
+use super::NUM_RGBA_COMPONENTS;
 use super::rgb_to_yuv;
 use super::yuv_to_rgb;
-use super::NUM_RGBA_COMPONENTS;
-use super::NUM_RGB_COMPONENTS;
 use crate::ToUsize;
 
 #[derive(Clone)]
@@ -352,8 +352,8 @@ pub fn yuv420p_dimensions(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::video::yuv::tests::rgb_frame;
     use crate::ToUsize;
+    use crate::video::yuv::tests::rgb_frame;
     use alloc::vec;
     use proptest::prelude::*;
 
@@ -454,7 +454,7 @@ pub mod tests {
             uv_len
         ];
         for (i, row) in frame.chunks_exact(frame_row_len).enumerate() {
-            for (j, rgb) in row.chunks_exact(3).enumerate() {
+            for (j, rgb) in row.as_chunks::<3>().0.iter().enumerate() {
                 let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
                 y[i * width.to_usize() + j] = yuv[0];
                 let sum = &mut sum_uv[(i / 2) * uv_width + (j / 2)];
@@ -494,7 +494,7 @@ pub mod tests {
         let frame_row_len = width * 3;
         let uv_width = width.div_ceil(2);
         for (i, row) in rgb_frame.chunks_exact_mut(frame_row_len).enumerate() {
-            for (j, rgb_out) in row.chunks_exact_mut(3).enumerate() {
+            for (j, rgb_out) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let k = (i / 2) * uv_width + (j / 2);
                 let yuv = [y[i * width + j], u[k], v[k]];
                 let rgb = yuv_to_rgb(yuv);

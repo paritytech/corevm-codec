@@ -1,6 +1,6 @@
 //! Range Assymertic Numeral System (rANS) encoder/decoder.
 
-use crate::{errors, SliceOutput};
+use crate::{SliceOutput, errors};
 use jam_codec::{Compact, Decode, Encode};
 
 mod bitset;

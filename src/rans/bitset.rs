@@ -1,4 +1,4 @@
-use crate::{rans::NUM_FREQS, ToUsize};
+use crate::{ToUsize, rans::NUM_FREQS};
 use core::{iter::FusedIterator, ops::RangeInclusive};
 use jam_codec::{Decode, Encode};
 

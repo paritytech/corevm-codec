@@ -2,10 +2,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZero;
 
+use super::NUM_RGB_COMPONENTS;
+use super::NUM_RGBA_COMPONENTS;
 use super::rgb_to_yuv;
 use super::yuv_to_rgb;
-use super::NUM_RGBA_COMPONENTS;
-use super::NUM_RGB_COMPONENTS;
 use crate::ToUsize;
 
 #[derive(Clone)]
@@ -228,8 +228,8 @@ pub fn rgb888_indexed8_to_yuv444p(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::yuv::tests::rgb_frame;
     use crate::ToUsize;
+    use crate::video::yuv::tests::rgb_frame;
     use alloc::vec;
     use alloc::vec::Vec;
     use proptest::prelude::*;
@@ -260,7 +260,7 @@ mod tests {
     fn rgba8888_to_yuv444p_works() {
         proptest!(|((width, height, rgb) in rgb_frame(1..=10, 1..=10))| {
             let rgba: Vec<_> = rgb
-                .chunks_exact(3)
+                .as_chunks::<3>().0.iter()
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], u8::MAX])
                 .collect();
             let width = NonZero::new(width).unwrap();

@@ -1,6 +1,6 @@
 //! Video codec.
 
-use crate::{errors, rans, timer_finish, timer_start, Input, Output};
+use crate::{Input, Output, errors, rans, timer_finish, timer_start};
 use alloc::{vec, vec::Vec};
 use core::num::NonZero;
 use jam_codec::{Compact, Decode, Encode};
