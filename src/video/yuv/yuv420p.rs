@@ -144,10 +144,9 @@ pub fn rgb888_to_yuv420p(
                 shift = shift.wrapping_add(1);
             }
             // Here we divide sum by count to compute average. This code works
-            // because tiles are 2x2 and we always increase shift by
-            // 1 in the second row (and when we process the first
-            // row we increase it either by 1 or 2); count can only
-            // be 1, 2 or 4.
+            // because tiles are 2x2 and we always increase shift by 1 in the
+            // second row (and when we process the first row we increase it
+            // either by 1 or 2); count can only be 1, 2 or 4.
             *u = div_by_power_of_two(u_sum, shift);
             *v = div_by_power_of_two(v_sum, shift);
         }
@@ -236,10 +235,9 @@ pub fn rgb888_indexed8_to_yuv420p(
                 shift = shift.wrapping_add(1);
             }
             // Here we divide sum by count to compute average. This code works
-            // because tiles are 2x2 and we always increase shift by
-            // 1 in the second row (and when we process the first
-            // row we increase it either by 1 or 2); count can only
-            // be 1, 2 or 4.
+            // because tiles are 2x2 and we always increase shift by 1 in the
+            // second row (and when we process the first row we increase it
+            // either by 1 or 2); count can only be 1, 2 or 4.
             *u = div_by_power_of_two(u_sum, shift);
             *v = div_by_power_of_two(v_sum, shift);
         }

@@ -107,7 +107,7 @@ pub fn rgb888_to_yuv420p(
         uv_len
     ];
     for (i, row) in frame.chunks_exact(frame_row_len).enumerate() {
-        for (j, rgb) in row.chunks_exact(3).enumerate() {
+        for (j, rgb) in row.as_chunks::<3>().0.iter().enumerate() {
             let yuv = rgb888_to_yuv888([rgb[0], rgb[1], rgb[2]]);
             y[y_offset + i * y_stride + j] = yuv[0];
             let sum = &mut sum_uv[(i / 2) * uv_width + (j / 2)];

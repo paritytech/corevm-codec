@@ -50,12 +50,12 @@ impl FreqBitSet {
     }
 
     /// Returns an iterator over indices of set bits.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + use<'_> {
+    pub fn iter(&self) -> impl Iterator<Item = usize> {
         Iter::new(self.data.iter().copied())
     }
 
     /// Returns an iterator over indices of unset bits.
-    pub fn zeros(&self) -> impl Iterator<Item = usize> + use<'_> {
+    pub fn zeros(&self) -> impl Iterator<Item = usize> {
         Iter::new(self.data.iter().map(|mask| !*mask))
     }
 
