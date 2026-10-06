@@ -56,7 +56,7 @@ native_build_and_run() {
 }
 
 corevm_build() {
-	if test -z "$POLKAPORTS_SYSROOT"; then
+	if test -z "$COREVM_SYSROOT"; then
 		printf "You need to install PolkaPorts from https://github.com/paritytech/polkaports and run \`./activate.sh corevm\` before you can build Rust binaries for CoreVM.\n" >&2
 		exit 1
 	fi
@@ -72,7 +72,7 @@ corevm_build() {
 		RUSTUP_TOOLCHAIN="$rust_version" \
 		cargo build \
 		"$@" \
-		--target="$POLKAPORTS_SYSROOT"/"$rust_target".json \
+		--target="$COREVM_SYSROOT"/"$rust_target".json \
 		-Zbuild-std=core,alloc,std,panic_abort \
 		-Zbuild-std-features=panic_immediate_abort
 	cd "$oldpwd"
