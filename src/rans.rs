@@ -1,6 +1,6 @@
 //! Range Assymertic Numeral System (rANS) encoder/decoder.
 
-use crate::{errors, SliceOutput};
+use crate::{SliceOutput, errors};
 use jam_codec::{Compact, Decode, Encode};
 
 mod bitset;
@@ -282,16 +282,16 @@ impl Encoder {
         let mut footer = SliceOutput(&mut buf[..]);
         Compact(self.state).encode_to(&mut footer);
         self.non_zero_freqs.encode_to(&mut footer);
-        // TODO we don't need to write the last/first frequency because we know their
-        // sum
+        // TODO we don't need to write the last/first frequency because we know
+        // their sum
         for i in self.non_zero_freqs.iter() {
             let f = self.freq(i);
             Compact(f).encode_to(&mut footer);
         }
         let footer_len = FOOTER_BUF_LEN - footer.0.len();
         let footer = &mut buf[..footer_len];
-        // We write the footer in reverse to not encode its length: we read it in
-        // reverse too.
+        // We write the footer in reverse to not encode its length: we read it
+        // in reverse too.
         footer.reverse();
         output.push_slice_rev(footer);
         #[cfg(not(feature = "stats"))]

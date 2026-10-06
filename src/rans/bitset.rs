@@ -1,4 +1,4 @@
-use crate::{rans::NUM_FREQS, ToUsize};
+use crate::{ToUsize, rans::NUM_FREQS};
 use core::{iter::FusedIterator, ops::RangeInclusive};
 use jam_codec::{Decode, Encode};
 
@@ -50,12 +50,12 @@ impl FreqBitSet {
     }
 
     /// Returns an iterator over indices of set bits.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + use<'_> {
+    pub fn iter(&self) -> impl Iterator<Item = usize> {
         Iter::new(self.data.iter().copied())
     }
 
     /// Returns an iterator over indices of unset bits.
-    pub fn zeros(&self) -> impl Iterator<Item = usize> + use<'_> {
+    pub fn zeros(&self) -> impl Iterator<Item = usize> {
         Iter::new(self.data.iter().map(|mask| !*mask))
     }
 

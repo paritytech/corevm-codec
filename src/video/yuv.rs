@@ -54,6 +54,13 @@ impl YuvFrame {
             Self::Dummy(frame) => frame.height(),
         }
     }
+
+    pub fn chroma_subsampling(&self) -> bool {
+        match self {
+            Self::Yuv420p(..) => true,
+            Self::Yuv444p(..) => false,
+        }
+    }
 }
 
 #[cfg(test)]

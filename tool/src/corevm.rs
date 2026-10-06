@@ -1,4 +1,4 @@
-use crate::{quake, Args};
+use crate::{Args, quake};
 use anyhow::anyhow;
 use corevm_codec::video;
 use std::{

@@ -30,7 +30,7 @@ default-members = ["."]
 
 [workspace.package]
 authors = ["Parity Technologies <admin@parity.io>"]
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/paritytech/corevm-codec.git"
 license = "Apache-2.0"
 version = "0.2.1"

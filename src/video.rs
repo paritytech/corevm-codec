@@ -1,6 +1,6 @@
 //! Video codec.
 
-use crate::{errors, rans, timer_finish, timer_start, Input, Output};
+use crate::{Input, Output, errors, rans, timer_finish, timer_start};
 use alloc::{vec, vec::Vec};
 use core::num::NonZero;
 use jam_codec::{Compact, Decode, Encode};
@@ -272,6 +272,52 @@ impl Encoder {
     ///
     /// This is currently empty but might change in the future.
     pub fn finish(self, _output: &mut impl Output) {}
+
+    /// Save current video encoder state in a checkpoint.
+    ///
+    /// Later you can restore the state via [`restore_from`](Self::restore_from)
+    /// and continue encoding video frames as if no frames were encoded
+    /// after the checkpoint.
+    ///
+    /// Note that the output needs to be truncated manually when you restore the
+    /// state from a checkpoint.
+    pub fn checkpoint(&self) -> EncoderCheckpoint {
+        EncoderCheckpoint {
+            prev_frame: self.prev_frame.clone(),
+            width: self.width,
+            height: self.height,
+            raw: self.raw,
+            quant: self.quant,
+        }
+    }
+
+    /// Restore video encoder state from a checkpoint created by
+    /// [`checkpoint`](Self::checkpoint).
+    ///
+    /// Panics if the checkpoint was created for an encoder with a different
+    /// configuration.
+    pub fn restore_from(&mut self, checkpoint: EncoderCheckpoint) {
+        assert!(
+            self.raw == checkpoint.raw
+                && self.quant == checkpoint.quant
+                && self.prev_frame.chroma_subsampling()
+                    == checkpoint.prev_frame.chroma_subsampling()
+                && self.width == checkpoint.width
+                && self.height == checkpoint.height
+        );
+        self.prev_frame = checkpoint.prev_frame;
+    }
+}
+
+/// Video encoder checkpoint.
+///
+/// Holds internal encoder state.
+pub struct EncoderCheckpoint {
+    width: NonZero<u16>,
+    height: NonZero<u16>,
+    raw: bool,
+    quant: u8,
+    prev_frame: YuvFrame,
 }
 
 errors! {
@@ -395,7 +441,11 @@ impl Decoder {
                 let mut indexed_rgb = vec![0_u8; palette_len + indices_len];
                 input.read(&mut indexed_rgb[..])?;
                 let (palette, indices) = indexed_rgb.split_at(palette_len);
-                for (i, rgb) in indices.iter().copied().zip(rgb_frame.chunks_exact_mut(3)) {
+                for (i, rgb) in indices
+                    .iter()
+                    .copied()
+                    .zip(rgb_frame.as_chunks_mut::<3>().0.iter_mut())
+                {
                     let j = 3 * i as usize;
                     rgb.copy_from_slice(&palette[j..j + 3]);
                 }
@@ -449,7 +499,11 @@ impl Decoder {
                 let mut indexed_rgb = vec![0_u8; palette_len + indices_len];
                 input.read(&mut indexed_rgb[..])?;
                 let (palette, indices) = indexed_rgb.split_at(palette_len);
-                for (i, rgba) in indices.iter().copied().zip(rgba_frame.chunks_exact_mut(4)) {
+                for (i, rgba) in indices
+                    .iter()
+                    .copied()
+                    .zip(rgba_frame.as_chunks_mut::<4>().0.iter_mut())
+                {
                     let j = 3 * i as usize;
                     rgba[..3].copy_from_slice(&palette[j..j + 3]);
                     rgba[3] = u8::MAX;
@@ -460,8 +514,10 @@ impl Decoder {
                 let mut rgb_frame = vec![0_u8; rgb_len];
                 input.read(&mut rgb_frame[..])?;
                 for (rgb, rgba) in rgb_frame
-                    .chunks_exact(3)
-                    .zip(rgba_frame.chunks_exact_mut(4))
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(rgba_frame.as_chunks_mut::<4>().0.iter_mut())
                 {
                     rgba[..3].copy_from_slice(rgb);
                     rgba[3] = u8::MAX;
@@ -491,6 +547,52 @@ impl Decoder {
         haar::backward(y, self.width, self.height, self.quant);
         Ok(())
     }
+
+    /// Save current video decoder state in a checkpoint.
+    ///
+    /// Later you can restore the state via [`restore_from`](Self::restore_from)
+    /// and continue decoding video frames as if no frames were decoded
+    /// after the checkpoint.
+    ///
+    /// Note that the input needs to be rewound manually when you restore the
+    /// state from a checkpoint.
+    pub fn checkpoint(&self) -> DecoderCheckpoint {
+        DecoderCheckpoint {
+            prev_frame: self.prev_frame.clone(),
+            width: self.width,
+            height: self.height,
+            raw: self.raw,
+            quant: self.quant,
+        }
+    }
+
+    /// Restore video decoder state from a checkpoint created by
+    /// [`checkpoint`](Self::checkpoint).
+    ///
+    /// Panics if the checkpoint was created for a decoder with a different
+    /// configuration.
+    pub fn restore_from(&mut self, checkpoint: DecoderCheckpoint) {
+        assert!(
+            self.raw == checkpoint.raw
+                && self.quant == checkpoint.quant
+                && self.prev_frame.chroma_subsampling()
+                    == checkpoint.prev_frame.chroma_subsampling()
+                && self.width == checkpoint.width
+                && self.height == checkpoint.height
+        );
+        self.prev_frame = checkpoint.prev_frame;
+    }
+}
+
+/// Video decoder checkpoint.
+///
+/// Holds internal decoder state.
+pub struct DecoderCheckpoint {
+    width: NonZero<u16>,
+    height: NonZero<u16>,
+    raw: bool,
+    quant: u8,
+    prev_frame: YuvFrame,
 }
 
 #[cfg(test)]
@@ -499,7 +601,7 @@ mod tests {
     use crate::ToUsize;
     use alloc::vec;
     use core::ops::RangeInclusive;
-    use proptest::{collection, prelude::*};
+    use proptest::{collection, prelude::*, sample};
 
     impl Config {
         fn no_quantization() -> Self {
@@ -670,6 +772,94 @@ mod tests {
                 decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
                 assert_eq!(frame, decoded_frame);
             }
+        });
+    }
+
+    fn config() -> impl Strategy<Value = Config> {
+        (any::<bool>(), any::<bool>(), 0_u8..=MAX_QUANTIZATION_LEVEL).prop_map(
+            |(raw, chroma_subsampling, quantization_level)| Config {
+                raw,
+                chroma_subsampling,
+                quantization_level,
+            },
+        )
+    }
+
+    #[test]
+    fn encoder_checkpoint_works() {
+        proptest!(|(
+            (width, height, frames) in rgb_frames(1..=10, 1..=10, 1..=3),
+            checkpoint in any::<sample::Index>(),
+            config in config()
+        )| {
+            let checkpoint_at = checkpoint.index(frames.len());
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let mut output = Vec::new();
+            let mut checkpoint = None;
+            let mut output_len = 0;
+            let mut encoder = Encoder::new(width, height, config);
+            encoder.start(&mut output);
+            for (i, frame) in frames.iter().enumerate() {
+                if i == checkpoint_at {
+                    checkpoint = Some(encoder.checkpoint());
+                    output_len = output.len();
+                }
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            let original_output = output.clone();
+            // Restart from the checkpoint.
+            encoder.restore_from(checkpoint.unwrap());
+            output.truncate(output_len);
+            for frame in frames.iter().skip(checkpoint_at) {
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            assert_eq!(original_output, output);
+        });
+    }
+
+    #[test]
+    fn decoder_checkpoint_works() {
+        proptest!(|(
+            (width, height, frames) in rgb_frames(1..=10, 1..=10, 1..=3),
+            checkpoint in any::<sample::Index>(),
+            config in config()
+        )| {
+            let checkpoint_at = checkpoint.index(frames.len());
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let mut output = Vec::new();
+            let mut encoder = Encoder::new(width, height, config);
+            encoder.start(&mut output);
+            for frame in frames.iter() {
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            encoder.finish(&mut output);
+            let mut checkpoint = None;
+            let mut decoder_input_checkpoint: &[u8] = &[];
+            let mut decoder_input = &output[..];
+            let mut decoder = Decoder::new(&mut decoder_input).unwrap();
+            let mut decoded_frames = Vec::new();
+            for i in 0..frames.len() {
+                if i == checkpoint_at {
+                    checkpoint = Some(decoder.checkpoint());
+                    decoder_input_checkpoint = decoder_input;
+                }
+                let mut decoded_frame = vec![0_u8; usize::from(width.get()) * usize::from(height.get()) * 3];
+                decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
+                decoded_frames.push(decoded_frame);
+            }
+            let orig_decoded_frames = decoded_frames.clone();
+            // Restart from the checkpoint.
+            decoder.restore_from(checkpoint.unwrap());
+            decoder_input = decoder_input_checkpoint;
+            decoded_frames.truncate(checkpoint_at);
+            for _ in checkpoint_at..frames.len() {
+                let mut decoded_frame = vec![0_u8; usize::from(width.get()) * usize::from(height.get()) * 3];
+                decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
+                decoded_frames.push(decoded_frame);
+            }
+            assert_eq!(orig_decoded_frames, decoded_frames);
         });
     }
 }

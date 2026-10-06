@@ -1,5 +1,5 @@
 use super::{
-    dequantize, max_transform_level, quantization_levels, quantize, MAX_QUANTIZATION_LEVEL,
+    MAX_QUANTIZATION_LEVEL, dequantize, max_transform_level, quantization_levels, quantize,
 };
 use core::num::NonZero;
 

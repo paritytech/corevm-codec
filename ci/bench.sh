@@ -18,6 +18,7 @@ corevm_benchmarks() {
 polkaports_install() {
 	sudo -n apt-get -qq update
 	sudo -n apt-get -qq install -y clang-20 lld-20 llvm-20 autotools-dev nasm
+    export PATH=/usr/lib/llvm-20/bin:"$PATH"
 	rustup component add rust-src
 	git clone --recurse-submodules https://github.com/paritytech/polkaports "$workdir"/polkaports
 	cd "$workdir"/polkaports
