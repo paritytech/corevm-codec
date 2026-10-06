@@ -32,8 +32,8 @@ impl Yuv420pFrame {
 
     /// Returns _Y_, _U_, _V_ as mutable slices.
     pub fn as_mut_slices(&mut self) -> (&mut [i16], &mut [i16], &mut [i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from `self.y_len` and
-        // `self.uv_len`.
+        // SAFETY: This is safe because `self.data` is constructed from
+        // `self.y_len` and `self.uv_len`.
         unsafe {
             let (y, uv) = self.data.split_at_mut_unchecked(self.y_len.to_usize());
             let (u, v) = uv.split_at_mut_unchecked(self.uv_len.to_usize());
@@ -43,8 +43,8 @@ impl Yuv420pFrame {
 
     /// Returns _Y_, _U_, _V_ as slices.
     pub fn as_slices(&self) -> (&[i16], &[i16], &[i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from `self.y_len` and
-        // `self.uv_len`.
+        // SAFETY: This is safe because `self.data` is constructed from
+        // `self.y_len` and `self.uv_len`.
         unsafe {
             let (y, uv) = self.data.split_at_unchecked(self.y_len.to_usize());
             let (u, v) = uv.split_at_unchecked(self.uv_len.to_usize());
@@ -120,7 +120,7 @@ pub fn rgb888_to_yuv420p(
             // First tile row.
             for (y, rgb) in y_row0_chunk
                 .iter_mut()
-                .zip(rgb_row0_chunk.chunks_exact(NUM_RGB_COMPONENTS))
+                .zip(rgb_row0_chunk.as_chunks::<NUM_RGB_COMPONENTS>().0)
             {
                 let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
                 *y = yuv[0];
@@ -134,7 +134,7 @@ pub fn rgb888_to_yuv420p(
             {
                 for (y, rgb) in y_row1_chunk
                     .iter_mut()
-                    .zip(rgb_row1_chunk.chunks_exact(NUM_RGB_COMPONENTS))
+                    .zip(rgb_row1_chunk.as_chunks::<NUM_RGB_COMPONENTS>().0)
                 {
                     let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
                     *y = yuv[0];
@@ -143,10 +143,11 @@ pub fn rgb888_to_yuv420p(
                 }
                 shift = shift.wrapping_add(1);
             }
-            // Here we divide sum by count to compute average. This code works because tiles
-            // are 2x2 and we always increase shift by 1 in the second row (and
-            // when we process the first row we increase it either by 1 or 2);
-            // count can only be 1, 2 or 4.
+            // Here we divide sum by count to compute average. This code works
+            // because tiles are 2x2 and we always increase shift by
+            // 1 in the second row (and when we process the first
+            // row we increase it either by 1 or 2); count can only
+            // be 1, 2 or 4.
             *u = div_by_power_of_two(u_sum, shift);
             *v = div_by_power_of_two(v_sum, shift);
         }
@@ -184,8 +185,8 @@ pub fn rgb888_indexed8_to_yuv420p(
             // Can only happen if y/indices lengths are incorrect.
             break;
         };
-        // N.B. y_row1 and indices_row1 might be empty, hence we iterate over them
-        // separately.
+        // N.B. y_row1 and indices_row1 might be empty, hence we iterate over
+        // them separately.
         let mut y_row1_chunks = y_row1.chunks_mut(2);
         let mut indices_row1_chunks = indices_row1.chunks(2);
         for (((u, v), y_row0_chunk), indices_row0_chunk) in u_row
@@ -234,10 +235,11 @@ pub fn rgb888_indexed8_to_yuv420p(
                 }
                 shift = shift.wrapping_add(1);
             }
-            // Here we divide sum by count to compute average. This code works because tiles
-            // are 2x2 and we always increase shift by 1 in the second row (and
-            // when we process the first row we increase it either by 1 or 2);
-            // count can only be 1, 2 or 4.
+            // Here we divide sum by count to compute average. This code works
+            // because tiles are 2x2 and we always increase shift by
+            // 1 in the second row (and when we process the first
+            // row we increase it either by 1 or 2); count can only
+            // be 1, 2 or 4.
             *u = div_by_power_of_two(u_sum, shift);
             *v = div_by_power_of_two(v_sum, shift);
         }
@@ -271,12 +273,14 @@ pub fn yuv420p_to_rgb888(
     let y_rows = y.chunks_exact(y_width);
     for (i, (rgb_row, y_row)) in rgb_rows.zip(y_rows).enumerate() {
         for (j, (rgb_out, y)) in rgb_row
-            .chunks_exact_mut(NUM_RGB_COMPONENTS)
+            .as_chunks_mut::<NUM_RGB_COMPONENTS>()
+            .0
+            .iter_mut()
             .zip(y_row.iter().copied())
             .enumerate()
         {
-            // TODO u,v indexing can be optimized similar to rgb888_to_yuv420p to avoid
-            // slicing panicking
+            // TODO u,v indexing can be optimized similar to rgb888_to_yuv420p
+            // to avoid slicing panicking
             let k = (i / 2) * uv_width + (j / 2);
             let rgb = yuv_to_rgb([y, u[k], v[k]]);
             rgb_out[0] = rgb[0];
@@ -313,12 +317,14 @@ pub fn yuv420p_to_rgba8888(
     let y_rows = y.chunks_exact(y_width);
     for (i, (rgb_row, y_row)) in rgba_rows.zip(y_rows).enumerate() {
         for (j, (rgba_out, y)) in rgb_row
-            .chunks_exact_mut(NUM_RGBA_COMPONENTS)
+            .as_chunks_mut::<NUM_RGBA_COMPONENTS>()
+            .0
+            .iter_mut()
             .zip(y_row.iter().copied())
             .enumerate()
         {
-            // TODO u,v indexing can be optimized similar to rgb888_to_yuv420p to avoid
-            // slicing panicking
+            // TODO u,v indexing can be optimized similar to rgb888_to_yuv420p
+            // to avoid slicing panicking
             let k = (i / 2) * uv_width + (j / 2);
             let rgb = yuv_to_rgb([y, u[k], v[k]]);
             rgba_out[0] = rgb[0];

@@ -30,7 +30,8 @@ impl Yuv444pFrame {
 
     /// Returns _Y_, _U_, _V_ as mutable slices.
     pub fn as_mut_slices(&mut self) -> (&mut [i16], &mut [i16], &mut [i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from `self.len`.
+        // SAFETY: This is safe because `self.data` is constructed from
+        // `self.len`.
         unsafe {
             let (y, uv) = self.data.split_at_mut_unchecked(self.len.to_usize());
             let (u, v) = uv.split_at_mut_unchecked(self.len.to_usize());
@@ -40,7 +41,8 @@ impl Yuv444pFrame {
 
     /// Returns _Y_, _U_, _V_ as slices.
     pub fn as_slices(&self) -> (&[i16], &[i16], &[i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from `self.len`.
+        // SAFETY: This is safe because `self.data` is constructed from
+        // `self.len`.
         unsafe {
             let (y, uv) = self.data.split_at_unchecked(self.len.to_usize());
             let (u, v) = uv.split_at_unchecked(self.len.to_usize());
@@ -105,7 +107,9 @@ fn rgb888_or_rgba888_to_yuv444p<const N: usize>(
         .zip(v.chunks_exact_mut(width))
     {
         for (((rgb, y), u), v) in rgb_row
-            .chunks_exact(N)
+            .as_chunks::<N>()
+            .0
+            .iter()
             .zip(y_row.iter_mut())
             .zip(u_row.iter_mut())
             .zip(v_row.iter_mut())
@@ -163,7 +167,9 @@ fn yuv444p_to_rgb888_or_rgba8888<const N: usize>(
         .zip(v.chunks_exact(width))
     {
         for (((rgb, y), u), v) in rgb_row
-            .chunks_exact_mut(N)
+            .as_chunks_mut::<N>()
+            .0
+            .iter_mut()
             .zip(y_row.iter().copied())
             .zip(u_row.iter().copied())
             .zip(v_row.iter().copied())

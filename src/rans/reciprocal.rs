@@ -60,8 +60,8 @@ impl Reciprocal {
         // First we shift by either 0 or 1 bits (0 is only for division by 1).
         // This shift is stored as the 6th bit of `shift` field.
         let secondary_shift = 1_u8 << 6;
-        // Then we shift by 0-15 bits. This shift is stored in bits 0-5 of `shift`
-        // field.
+        // Then we shift by 0-15 bits. This shift is stored in bits 0-5 of
+        // `shift` field.
         let primary_shift = shift as u8 - 1;
         Self {
             // Truncate to u32.
@@ -81,9 +81,9 @@ impl ReciprocalDiv for u32 {
     ///
     /// See R. Alverson "Integer division using reciprocals" https://doi.org/10.1109/ARITH.1991.145558.
     fn reciprocal_div(self, denominator_reciprocal: Reciprocal) -> Self {
-        // Schematically `x/y == (x * r) >> (32 + p)`, but the actual implementation is
-        // more involved to account for division by 1 and for the fact that `r`
-        // is a 33-bit number.
+        // Schematically `x/y == (x * r) >> (32 + p)`, but the actual
+        // implementation is more involved to account for division by 1
+        // and for the fact that `r` is a 33-bit number.
         let numerator = self;
         let r = denominator_reciprocal;
         let q = ((u64::from(numerator) * u64::from(r.value)) >> SHIFT) as u32;

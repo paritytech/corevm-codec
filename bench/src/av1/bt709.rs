@@ -15,8 +15,8 @@ pub fn rgb888_to_yuv888(rgb: [u8; 3]) -> [u8; 3] {
     const fn y_coefs(x0: f64, x1: f64, _x2: f64) -> [u32; 3] {
         let c0 = round(x0 * Y_MAX as f64) as u32;
         let c1 = round(x1 * Y_MAX as f64) as u32;
-        // N.B. We don't use the last coefficient to ensure that the sum of all three is
-        // 1.
+        // N.B. We don't use the last coefficient to ensure that the sum of all
+        // three is 1.
         let c2 = Y_MAX - c0 - c1;
         [c0, c1, c2]
     }
@@ -29,16 +29,16 @@ pub fn rgb888_to_yuv888(rgb: [u8; 3]) -> [u8; 3] {
 
     const fn u_coefs(x0: f64, x1: f64, _x2: f64, denominator: f64) -> [i32; 3] {
         let [c0, c1] = uv_coefs(x0, x1, denominator);
-        // N.B. We don't use the last coefficient to ensure that the sum of all three is
-        // 0.
+        // N.B. We don't use the last coefficient to ensure that the sum of all
+        // three is 0.
         let c2 = -(c0 + c1);
         [c0, c1, c2]
     }
 
     const fn v_coefs(_x0: f64, x1: f64, x2: f64, denominator: f64) -> [i32; 3] {
         let [c1, c2] = uv_coefs(x1, x2, denominator);
-        // N.B. We don't use the first coefficient to ensure that the sum of all three
-        // is 0.
+        // N.B. We don't use the first coefficient to ensure that the sum of all
+        // three is 0.
         let c0 = -(c1 + c2);
         [c0, c1, c2]
     }
@@ -170,7 +170,8 @@ mod tests {
             ]
         }
 
-        // Check that the discretized formula produces the same result as analogue one.
+        // Check that the discretized formula produces the same result as
+        // analogue one.
         let mut max_residual = [0.0; 3];
         for r in 16..=235 {
             for g in 16..=235 {
