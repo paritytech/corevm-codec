@@ -247,16 +247,10 @@ impl Encoder {
     pub fn start(&mut self, output: &mut impl Output) {
         Compact(self.width.get()).encode_to(output);
         Compact(self.height.get()).encode_to(output);
-        let chroma_subsampling = match self.frame {
-            YuvFrame::Yuv420p(..) => 1_u8,
-            YuvFrame::Yuv444p(..) => 0_u8,
-            YuvFrame::Dummy(ref frame) => {
-                if frame.chroma_subsampling() {
-                    1_u8
-                } else {
-                    0_u8
-                }
-            }
+        let chroma_subsampling = if self.frame.chroma_subsampling() {
+            1_u8
+        } else {
+            0_u8
         };
         let raw = match self.raw {
             true => 1_u8,

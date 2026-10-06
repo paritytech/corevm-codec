@@ -59,6 +59,7 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(..) => true,
             Self::Yuv444p(..) => false,
+            Self::Dummy(frame) => frame.chroma_subsampling(),
         }
     }
 }
