@@ -112,7 +112,6 @@ pub struct Encoder {
     width: NonZero<u16>,
     height: NonZero<u16>,
     quant: u8,
-    raw: bool,
     // Current frame.
     frame: YuvFrame,
     // Previous frame.
@@ -125,10 +124,13 @@ impl Encoder {
     /// Creates new encoder with the provided width, height, and configuration.
     pub fn new(width: NonZero<u16>, height: NonZero<u16>, config: Config) -> Self {
         let quant = config.quantization_level.min(MAX_QUANTIZATION_LEVEL);
-        let frame = YuvFrame::new(width, height, config.chroma_subsampling);
+        let frame = YuvFrame::new(width, height, config.chroma_subsampling, config.raw);
         let prev_frame = frame.clone();
-        let buf = Vec::with_capacity(32 * 1024);
-        let raw = config.raw;
+        let buf = if config.raw {
+            Vec::new()
+        } else {
+            Vec::with_capacity(32 * 1024)
+        };
         Self {
             width,
             height,
@@ -136,7 +138,6 @@ impl Encoder {
             frame,
             prev_frame,
             buf,
-            raw,
         }
     }
 
@@ -146,7 +147,7 @@ impl Encoder {
             usize::from(self.width.get()) * usize::from(self.height.get()) * 3,
             rgb_frame.len()
         );
-        if self.raw {
+        if self.frame.raw() {
             RawVideoFrameFormat::Rgb888.encode_to(output);
             output.write(rgb_frame);
             return Stats::default();
@@ -160,6 +161,8 @@ impl Encoder {
                 let (y, u, v) = frame.as_mut_slices();
                 rgb888_to_yuv444p(rgb_frame, self.width, y, u, v);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         self.write_frame(output)
     }
@@ -178,7 +181,7 @@ impl Encoder {
             usize::from(self.width.get()) * usize::from(self.height.get()) + 3 * 256,
             indexed_rgb_frame.len()
         );
-        if self.raw {
+        if self.frame.raw() {
             RawVideoFrameFormat::Rgb888Indexed8.encode_to(output);
             output.write(indexed_rgb_frame);
             return Stats::default();
@@ -192,6 +195,8 @@ impl Encoder {
                 let (y, u, v) = frame.as_mut_slices();
                 rgb888_indexed8_to_yuv444p(indexed_rgb_frame, self.width, y, u, v);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         self.write_frame(output)
     }
@@ -239,11 +244,12 @@ impl Encoder {
     pub fn start(&mut self, output: &mut impl Output) {
         Compact(self.width.get()).encode_to(output);
         Compact(self.height.get()).encode_to(output);
-        let chroma_subsampling = match self.frame {
-            YuvFrame::Yuv420p(..) => 1_u8,
-            YuvFrame::Yuv444p(..) => 0_u8,
+        let chroma_subsampling = if self.frame.chroma_subsampling() {
+            1_u8
+        } else {
+            0_u8
         };
-        let raw = match self.raw {
+        let raw = match self.frame.raw() {
             true => 1_u8,
             false => 0_u8,
         };
@@ -271,7 +277,6 @@ impl Encoder {
             prev_frame: self.prev_frame.clone(),
             width: self.width,
             height: self.height,
-            raw: self.raw,
             quant: self.quant,
         }
     }
@@ -283,7 +288,7 @@ impl Encoder {
     /// configuration.
     pub fn restore_from(&mut self, checkpoint: EncoderCheckpoint) {
         assert!(
-            self.raw == checkpoint.raw
+            self.prev_frame.raw() == checkpoint.prev_frame.raw()
                 && self.quant == checkpoint.quant
                 && self.prev_frame.chroma_subsampling()
                     == checkpoint.prev_frame.chroma_subsampling()
@@ -300,7 +305,6 @@ impl Encoder {
 pub struct EncoderCheckpoint {
     width: NonZero<u16>,
     height: NonZero<u16>,
-    raw: bool,
     quant: u8,
     prev_frame: YuvFrame,
 }
@@ -335,7 +339,6 @@ pub struct Decoder {
     width: NonZero<u16>,
     height: NonZero<u16>,
     quant: u8,
-    raw: bool,
     frame: YuvFrame,
     prev_frame: YuvFrame,
 }
@@ -362,13 +365,12 @@ impl Decoder {
         };
         let width = NonZero::new(width).ok_or(InvalidVideoStream)?;
         let height = NonZero::new(height).ok_or(InvalidVideoStream)?;
-        let frame = YuvFrame::new(width, height, chroma_subsampling);
+        let frame = YuvFrame::new(width, height, chroma_subsampling, raw);
         let prev_frame = frame.clone();
         Ok(Self {
             width,
             height,
             quant,
-            raw,
             frame,
             prev_frame,
         })
@@ -394,7 +396,7 @@ impl Decoder {
             usize::from(self.width.get()) * usize::from(self.height.get()) * 3,
             rgb_frame.len()
         );
-        if self.raw {
+        if self.frame.raw() {
             return self.read_rgb888_frame_raw(input, rgb_frame);
         }
         self.read_yuv420p_frame(input)?;
@@ -407,6 +409,8 @@ impl Decoder {
                 let (y, u, v) = frame.as_slices();
                 yuv444p_to_rgb888(y, u, v, self.width, rgb_frame);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         Ok(())
     }
@@ -450,7 +454,7 @@ impl Decoder {
             usize::from(self.width.get()) * usize::from(self.height.get()) * 4,
             rgba_frame.len()
         );
-        if self.raw {
+        if self.frame.raw() {
             return self.read_rgba8888_frame_raw(input, rgba_frame);
         }
         self.read_yuv420p_frame(input)?;
@@ -463,6 +467,8 @@ impl Decoder {
                 let (y, u, v) = frame.as_slices();
                 yuv444p_to_rgba8888(y, u, v, self.width, rgba_frame);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         Ok(())
     }
@@ -542,7 +548,6 @@ impl Decoder {
             prev_frame: self.prev_frame.clone(),
             width: self.width,
             height: self.height,
-            raw: self.raw,
             quant: self.quant,
         }
     }
@@ -554,7 +559,7 @@ impl Decoder {
     /// configuration.
     pub fn restore_from(&mut self, checkpoint: DecoderCheckpoint) {
         assert!(
-            self.raw == checkpoint.raw
+            self.prev_frame.raw() == checkpoint.prev_frame.raw()
                 && self.quant == checkpoint.quant
                 && self.prev_frame.chroma_subsampling()
                     == checkpoint.prev_frame.chroma_subsampling()
@@ -571,7 +576,6 @@ impl Decoder {
 pub struct DecoderCheckpoint {
     width: NonZero<u16>,
     height: NonZero<u16>,
-    raw: bool,
     quant: u8,
     prev_frame: YuvFrame,
 }

@@ -1,18 +1,28 @@
 use core::num::NonZero;
 
+mod dummy;
 mod yuv420p;
 mod yuv444p;
 
-pub use self::{yuv420p::*, yuv444p::*};
+pub use self::{dummy::*, yuv420p::*, yuv444p::*};
 
 #[derive(Clone)]
 pub enum YuvFrame {
     Yuv420p(Yuv420pFrame),
     Yuv444p(Yuv444pFrame),
+    Dummy(DummyFrame),
 }
 
 impl YuvFrame {
-    pub fn new(width: NonZero<u16>, height: NonZero<u16>, chroma_subsampling: bool) -> Self {
+    pub fn new(
+        width: NonZero<u16>,
+        height: NonZero<u16>,
+        chroma_subsampling: bool,
+        raw: bool,
+    ) -> Self {
+        if raw {
+            return Self::Dummy(DummyFrame::new(chroma_subsampling));
+        }
         if chroma_subsampling {
             Self::Yuv420p(Yuv420pFrame::new(width, height))
         } else {
@@ -25,6 +35,7 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(frame) => frame.as_mut_slices(),
             Self::Yuv444p(frame) => frame.as_mut_slices(),
+            Self::Dummy(..) => unreachable!(),
         }
     }
 
@@ -32,6 +43,7 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(frame) => frame.uv_width(),
             Self::Yuv444p(frame) => frame.width(),
+            Self::Dummy(..) => unreachable!(),
         }
     }
 
@@ -39,6 +51,7 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(frame) => frame.uv_height(),
             Self::Yuv444p(frame) => frame.height(),
+            Self::Dummy(..) => unreachable!(),
         }
     }
 
@@ -46,6 +59,15 @@ impl YuvFrame {
         match self {
             Self::Yuv420p(..) => true,
             Self::Yuv444p(..) => false,
+            Self::Dummy(frame) => frame.chroma_subsampling(),
+        }
+    }
+
+    pub fn raw(&self) -> bool {
+        match self {
+            Self::Yuv420p(..) => false,
+            Self::Yuv444p(..) => false,
+            Self::Dummy(..) => true,
         }
     }
 }
