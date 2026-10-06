@@ -125,9 +125,13 @@ impl Encoder {
     /// Creates new encoder with the provided width, height, and configuration.
     pub fn new(width: NonZero<u16>, height: NonZero<u16>, config: Config) -> Self {
         let quant = config.quantization_level.min(MAX_QUANTIZATION_LEVEL);
-        let frame = YuvFrame::new(width, height, config.chroma_subsampling);
+        let frame = YuvFrame::new(width, height, config.chroma_subsampling, config.raw);
         let prev_frame = frame.clone();
-        let buf = Vec::with_capacity(32 * 1024);
+        let buf = if config.raw {
+            Vec::new()
+        } else {
+            Vec::with_capacity(32 * 1024)
+        };
         let raw = config.raw;
         Self {
             width,
@@ -160,6 +164,8 @@ impl Encoder {
                 let (y, u, v) = frame.as_mut_slices();
                 rgb888_to_yuv444p(rgb_frame, self.width, y, u, v);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         self.write_frame(output)
     }
@@ -192,6 +198,8 @@ impl Encoder {
                 let (y, u, v) = frame.as_mut_slices();
                 rgb888_indexed8_to_yuv444p(indexed_rgb_frame, self.width, y, u, v);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         self.write_frame(output)
     }
@@ -242,6 +250,13 @@ impl Encoder {
         let chroma_subsampling = match self.frame {
             YuvFrame::Yuv420p(..) => 1_u8,
             YuvFrame::Yuv444p(..) => 0_u8,
+            YuvFrame::Dummy(ref frame) => {
+                if frame.chroma_subsampling() {
+                    1_u8
+                } else {
+                    0_u8
+                }
+            }
         };
         let raw = match self.raw {
             true => 1_u8,
@@ -316,7 +331,7 @@ impl Decoder {
         };
         let width = NonZero::new(width).ok_or(InvalidVideoStream)?;
         let height = NonZero::new(height).ok_or(InvalidVideoStream)?;
-        let frame = YuvFrame::new(width, height, chroma_subsampling);
+        let frame = YuvFrame::new(width, height, chroma_subsampling, raw);
         let prev_frame = frame.clone();
         Ok(Self {
             width,
@@ -361,6 +376,8 @@ impl Decoder {
                 let (y, u, v) = frame.as_slices();
                 yuv444p_to_rgb888(y, u, v, self.width, rgb_frame);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         Ok(())
     }
@@ -413,6 +430,8 @@ impl Decoder {
                 let (y, u, v) = frame.as_slices();
                 yuv444p_to_rgba8888(y, u, v, self.width, rgba_frame);
             }
+            // Raw frames are handled above.
+            YuvFrame::Dummy(..) => unreachable!(),
         }
         Ok(())
     }
