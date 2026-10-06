@@ -1,6 +1,6 @@
 //! Video codec.
 
-use crate::{errors, rans, timer_finish, timer_start, Input, Output};
+use crate::{Input, Output, errors, rans, timer_finish, timer_start};
 use alloc::{vec, vec::Vec};
 use core::num::NonZero;
 use jam_codec::{Compact, Decode, Encode};
@@ -378,7 +378,11 @@ impl Decoder {
                 let mut indexed_rgb = vec![0_u8; palette_len + indices_len];
                 input.read(&mut indexed_rgb[..])?;
                 let (palette, indices) = indexed_rgb.split_at(palette_len);
-                for (i, rgb) in indices.iter().copied().zip(rgb_frame.chunks_exact_mut(3)) {
+                for (i, rgb) in indices
+                    .iter()
+                    .copied()
+                    .zip(rgb_frame.as_chunks_mut::<3>().0.iter_mut())
+                {
                     let j = 3 * i as usize;
                     rgb.copy_from_slice(&palette[j..j + 3]);
                 }
@@ -430,7 +434,11 @@ impl Decoder {
                 let mut indexed_rgb = vec![0_u8; palette_len + indices_len];
                 input.read(&mut indexed_rgb[..])?;
                 let (palette, indices) = indexed_rgb.split_at(palette_len);
-                for (i, rgba) in indices.iter().copied().zip(rgba_frame.chunks_exact_mut(4)) {
+                for (i, rgba) in indices
+                    .iter()
+                    .copied()
+                    .zip(rgba_frame.as_chunks_mut::<4>().0.iter_mut())
+                {
                     let j = 3 * i as usize;
                     rgba[..3].copy_from_slice(&palette[j..j + 3]);
                     rgba[3] = u8::MAX;
@@ -441,8 +449,10 @@ impl Decoder {
                 let mut rgb_frame = vec![0_u8; rgb_len];
                 input.read(&mut rgb_frame[..])?;
                 for (rgb, rgba) in rgb_frame
-                    .chunks_exact(3)
-                    .zip(rgba_frame.chunks_exact_mut(4))
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(rgba_frame.as_chunks_mut::<4>().0.iter_mut())
                 {
                     rgba[..3].copy_from_slice(rgb);
                     rgba[3] = u8::MAX;

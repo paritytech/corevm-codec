@@ -3,7 +3,7 @@ use std::{ffi::CString, path::PathBuf, process::ExitCode, time::Instant};
 use anyhow::anyhow;
 use clap::Parser;
 use corevm_host::Outcome;
-use jam_types::{max_exports, SignedGas};
+use jam_types::{SignedGas, max_exports};
 
 mod engine;
 
