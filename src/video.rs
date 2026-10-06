@@ -506,6 +506,30 @@ impl Decoder {
         haar::backward(y, self.width, self.height, self.quant);
         Ok(())
     }
+
+    /// Save current video decoder state in a checkpoint.
+    ///
+    /// Later you can restore the state via [`restore_from`](Self::restore_from)
+    /// and continue decoding video frames as if no frames were decoded
+    /// after the checkpoint.
+    pub fn checkpoint(&self) -> DecoderCheckpoint {
+        DecoderCheckpoint {
+            prev_frame: self.prev_frame.clone(),
+        }
+    }
+
+    /// Restore video decoder state from a checkpoint created by
+    /// [`checkpoint`](Self::checkpoint).
+    pub fn restore_from(&mut self, checkpoint: DecoderCheckpoint) {
+        self.prev_frame = checkpoint.prev_frame;
+    }
+}
+
+/// Video decoder checkpoint.
+///
+/// Holds internal decoder state.
+pub struct DecoderCheckpoint {
+    prev_frame: YuvFrame,
 }
 
 #[cfg(test)]
@@ -701,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_works() {
+    fn encoder_checkpoint_works() {
         proptest!(|(
             (width, height, frames, checkpoint_at) in rgb_frames_with_checkpoint(1..=10, 1..=10, 1..=3),
             raw in any::<bool>()
@@ -726,13 +750,57 @@ mod tests {
                 encoder.write_rgb888_frame(frame, &mut output);
             }
             let original_output = output.clone();
-            // Repeat from the checkpoint.
+            // Restart from the checkpoint.
             encoder.restore_from(checkpoint.unwrap());
             output.truncate(output_len);
             for frame in frames.iter().skip(checkpoint_at) {
                 encoder.write_rgb888_frame(frame, &mut output);
             }
             assert_eq!(original_output, output);
+        });
+    }
+
+    #[test]
+    fn decoder_checkpoint_works() {
+        proptest!(|(
+            (width, height, frames, checkpoint_at) in rgb_frames_with_checkpoint(1..=10, 1..=10, 1..=3),
+            raw in any::<bool>()
+        )| {
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let mut output = Vec::new();
+            let config = if raw {
+                Config::default_raw()
+            } else {
+                Config::default_lossless()
+            };
+            let mut encoder = Encoder::new(width, height, config);
+            encoder.start(&mut output);
+            for frame in frames.iter() {
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            encoder.finish(&mut output);
+            let mut checkpoint = None;
+            let mut decoder_input_checkpoint: &[u8] = &[];
+            let mut decoder_input = &output[..];
+            let mut decoder = Decoder::new(&mut decoder_input).unwrap();
+            for (i, frame) in frames.iter().enumerate() {
+                if i == checkpoint_at {
+                    checkpoint = Some(decoder.checkpoint());
+                    decoder_input_checkpoint = decoder_input;
+                }
+                let mut decoded_frame = vec![0_u8; usize::from(width.get()) * usize::from(height.get()) * 3];
+                decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
+                assert_eq!(frame.as_slice(), decoded_frame.as_slice());
+            }
+            // Restart from the checkpoint.
+            decoder.restore_from(checkpoint.unwrap());
+            decoder_input = decoder_input_checkpoint;
+            for frame in frames.into_iter().skip(checkpoint_at) {
+                let mut decoded_frame = vec![0_u8; usize::from(width.get()) * usize::from(height.get()) * 3];
+                decoder.read_rgb888_frame(&mut decoder_input, &mut decoded_frame).unwrap();
+                assert_eq!(frame, decoded_frame);
+            }
         });
     }
 }
