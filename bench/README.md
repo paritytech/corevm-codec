@@ -1,8 +1,8 @@
 # Run benchmarks
 
 ```bash
-# Run benchmarks under PolkaVM.
-./scripts/bench.sh polkavm
+# Run RISCV benchmarks in CoreVM.
+./scripts/bench.sh riscv
 
 # Run benchmarks natively.
 ./scripts/bench.sh native

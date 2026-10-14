@@ -11,13 +11,13 @@ publish = false
 [features]
 default = ["corevm"]
 corevm = []
-qoi = []
+qoi = ["dep:qoi"]
 av1 = ["dep:rav1e"]
 
 [lints]
 workspace = true
 
 [dependencies]
-corevm-codec = { workspace = true }
-qoi = { version = "0.4.1", default-features = false, features = ["alloc"] }
+corevm-codec = { workspace = true, features = ["std", "stats"] }
+qoi = { version = "0.4.1", optional = true }
 rav1e = { version = "0.7.1", default-features = false, features = ["asm"], optional = true }

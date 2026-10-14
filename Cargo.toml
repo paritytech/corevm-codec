@@ -26,7 +26,6 @@ proptest = "1.9.0"
 [workspace]
 resolver = "2"
 members = [".", "tool", "bench", "bench/run", "wasm"]
-exclude = ["bench/guest"]
 default-members = ["."]
 
 [workspace.package]
