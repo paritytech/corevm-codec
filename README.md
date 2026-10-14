@@ -6,7 +6,7 @@ Currently this includes only video codec.
 
 ## Video codec
 
-This is fast and reasonably efficient video codec optimized for RISCV.
+This is fast and reasonably efficient video codec optimized for PVM.
 This codec uses YUV color model, Haar wavelet transform, scalar quantization, rANS encoder, and simple inter-frame delta encoding.
 To the best of author's knowledge this is the smallest number of stages of a video encoding pipeline that are required to get decent compression ratio without significant performance degradation.
 
@@ -17,20 +17,24 @@ Hence a custom codec.
 
 ### Benchmarks
 
-Below are the results of a benchmark for AV1, CoreVM and QOI+rANS codecs.
-The benchmark encodes 6 seconds worth of Quake frames.
-The benchmark was run inside CoreVM. Original video size is 9327 KiB.
+The benchmarks encode 6 seconds (144 frames, 320x200) of Quake gameplay with AV1, CoreVM and QOI+rANS codecs.
+The raw RGB888 video size is 27000 KiB; the compression ratio is one minus the compressed size divided by the raw size.
+CoreVM codec uses quantization level 4.
+The benchmarks were run on AMD Ryzen Threadripper 3970X.
 
-| Codec | Compressed size  | Encoding time | Compression ratio | Crate |
-|-------|-----------------:|--------------:|------------------:|-------|
-| CoreVM | 2283 KiB | 308 ms | 76% | |
-| QOI+rANS | 5142 KiB | 192 ms | 45% | [qoi](https://docs.rs/qoi/latest/qoi/) |
-| AV1 | 275 KiB | 22403 ms | 97% | [rav1e](https://docs.rs/rav1e/latest/rav1e/) |
+The following results were obtained under PolkaVM's recompiler (using `./scripts/bench.sh polkavm`),
+with gas metering enabled and the full gas cost model with L2 cache hit memory access cost.
+AV1 encoder depends on the Rust standard library and runs only natively.
 
-Same benchmark on `x86_64` without CoreVM.
+| Codec | Compressed size | Compression ratio | Encoding time | Encoding gas per frame | Decoding time | Decoding gas per frame | Crate |
+|-------|----------------:|------------------:|--------------:|-----------------------:|--------------:|-----------------------:|-------|
+| corevm-codec 0.3 | 1498 KiB | 94.5% | 138 ms | 14.5 M | 146 ms | 11.7 M | |
+| QOI+rANS | 5026 KiB | 81.4% | 105 ms | 19.8 M | | | [qoi](https://docs.rs/qoi/latest/qoi/) |
 
-| Codec | Encoding time |
-|-------|--------------:|
-| CoreVM | 172 ms |
-| QOI+rANS | 88 ms |
-| AV1 | 1109 ms |
+The following results were obtained natively (using `./scripts/bench.sh native`):
+
+| Codec | Compressed size | Compression ratio | Encoding time | Crate |
+|-------|----------------:|------------------:|--------------:|-------|
+| corevm-codec 0.3 | 1498 KiB | 94.5% | 127 ms | |
+| QOI+rANS | 5026 KiB | 81.4% | 82 ms | [qoi](https://docs.rs/qoi/latest/qoi/) |
+| AV1 | 268 KiB | 99.0% | 1617 ms | [rav1e](https://docs.rs/rav1e/latest/rav1e/) |

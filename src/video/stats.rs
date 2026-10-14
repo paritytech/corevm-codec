@@ -39,8 +39,7 @@ impl core::ops::AddAssign<&Stats> for Stats {
 #[doc(hidden)]
 pub struct TimeStats {
     pub transform: std::time::Duration,
-    pub delta: std::time::Duration,
-    pub signmag: std::time::Duration,
+    pub entropy: std::time::Duration,
     /// The number of accumulated samples.
     pub count: u32,
 }
@@ -49,8 +48,7 @@ pub struct TimeStats {
 impl core::ops::AddAssign<&TimeStats> for TimeStats {
     fn add_assign(&mut self, other: &TimeStats) {
         self.transform += other.transform;
-        self.delta += other.delta;
-        self.signmag += other.signmag;
+        self.entropy += other.entropy;
         self.count += other.count;
     }
 }

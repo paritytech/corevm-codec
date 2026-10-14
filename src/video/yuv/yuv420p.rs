@@ -2,15 +2,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZero;
 
-use super::NUM_RGB_COMPONENTS;
-use super::NUM_RGBA_COMPONENTS;
-use super::rgb_to_yuv;
 use super::yuv_to_rgb;
-use crate::ToUsize;
+use crate::{
+    ToUsize,
+    video::{Sample, quantize},
+};
 
 #[derive(Clone)]
 pub struct Yuv420pFrame {
-    data: Vec<i16>,
+    data: Vec<Sample>,
     y_len: u32,
     uv_len: u32,
     uv_width: NonZero<u16>,
@@ -20,7 +20,7 @@ pub struct Yuv420pFrame {
 impl Yuv420pFrame {
     pub fn new(width: NonZero<u16>, height: NonZero<u16>) -> Self {
         let (y_len, uv_len, uv_width, uv_height) = yuv420p_dimensions(width, height);
-        let data = vec![0; y_len.to_usize() + 2 * uv_len.to_usize()];
+        let data = vec![Sample::default(); y_len.to_usize() + 2 * uv_len.to_usize()];
         Self {
             data,
             y_len,
@@ -31,25 +31,17 @@ impl Yuv420pFrame {
     }
 
     /// Returns _Y_, _U_, _V_ as mutable slices.
-    pub fn as_mut_slices(&mut self) -> (&mut [i16], &mut [i16], &mut [i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from
-        // `self.y_len` and `self.uv_len`.
-        unsafe {
-            let (y, uv) = self.data.split_at_mut_unchecked(self.y_len.to_usize());
-            let (u, v) = uv.split_at_mut_unchecked(self.uv_len.to_usize());
-            (y, u, v)
-        }
+    pub fn as_mut_slices(&mut self) -> (&mut [Sample], &mut [Sample], &mut [Sample]) {
+        let (y, uv) = self.data.split_at_mut(self.y_len.to_usize());
+        let (u, v) = uv.split_at_mut(self.uv_len.to_usize());
+        (y, u, v)
     }
 
     /// Returns _Y_, _U_, _V_ as slices.
-    pub fn as_slices(&self) -> (&[i16], &[i16], &[i16]) {
-        // SAFETY: This is safe because `self.data` is constructed from
-        // `self.y_len` and `self.uv_len`.
-        unsafe {
-            let (y, uv) = self.data.split_at_unchecked(self.y_len.to_usize());
-            let (u, v) = uv.split_at_unchecked(self.uv_len.to_usize());
-            (y, u, v)
-        }
+    pub fn as_slices(&self) -> (&[Sample], &[Sample], &[Sample]) {
+        let (y, uv) = self.data.split_at(self.y_len.to_usize());
+        let (u, v) = uv.split_at(self.uv_len.to_usize());
+        (y, u, v)
     }
 
     pub fn uv_width(&self) -> NonZero<u16> {
@@ -61,274 +53,129 @@ impl Yuv420pFrame {
     }
 }
 
-fn div_by_power_of_two(value: i16, q: u8) -> i16 {
-    let sign_bit = value >> 15;
-    (value + (sign_bit & ((1_i16 << q) - 1))) >> q
+#[inline(always)]
+fn pixel_row_to_yuv420p<P>(
+    pixels: &[P],
+    y: &mut [Sample],
+    u: &mut [Sample],
+    v: &mut [Sample],
+    to_yuv: impl Fn(&P) -> [i16; 3],
+    chroma_of_pair: impl Fn(i16, i16, i16) -> i16,
+    chroma_of_last_pixel: impl Fn(i16, i16) -> i16,
+) {
+    let (pixel_pairs, last_pixel) = pixels.as_chunks::<2>();
+    let (y_pairs, last_y) = y.as_chunks_mut::<2>();
+    for (((pixels, y), u), v) in pixel_pairs
+        .iter()
+        .zip(y_pairs)
+        .zip(u.iter_mut())
+        .zip(v.iter_mut())
+    {
+        let [yuv0, yuv1] = pixels.each_ref().map(&to_yuv);
+        y[0].current = yuv0[0];
+        y[1].current = yuv1[0];
+        u.current = chroma_of_pair(u.current, yuv0[1], yuv1[1]);
+        v.current = chroma_of_pair(v.current, yuv0[2], yuv1[2]);
+    }
+    if let ([pixel], [y], Some(u), Some(v)) = (last_pixel, last_y, u.last_mut(), v.last_mut()) {
+        let yuv = to_yuv(pixel);
+        y.current = yuv[0];
+        u.current = chroma_of_last_pixel(u.current, yuv[1]);
+        v.current = chroma_of_last_pixel(v.current, yuv[2]);
+    }
 }
 
-/// Converts RGB frame to planar YUV frame using [`rgb_to_yuv`] with 4:2:0
-/// chroma subsampling.
-///
-/// If slices' lengths aren't correct the output is undefined; the function will
-/// only panic when debug assertions are enabled.
-pub fn rgb888_to_yuv420p(
-    rgb_frame: &[u8],
+#[inline(never)]
+pub fn pixels_to_yuv420p<P>(
+    pixels: &[P],
     width: NonZero<u16>,
-    y: &mut [i16],
-    u: &mut [i16],
-    v: &mut [i16],
+    y: &mut [Sample],
+    u: &mut [Sample],
+    v: &mut [Sample],
+    to_yuv: impl Fn(&P) -> [i16; 3],
 ) {
-    #[cfg(debug_assertions)]
+    let width = usize::from(width.get());
+    let uv_width = width.div_ceil(2);
+    debug_assert_eq!(pixels.len(), y.len());
+    debug_assert_eq!(u.len(), uv_width * (y.len() / width).div_ceil(2));
+    debug_assert_eq!(u.len(), v.len());
+    let mut pixel_row_pairs = pixels.chunks_exact(2 * width);
+    let mut y_row_pairs = y.chunks_exact_mut(2 * width);
+    let mut u_rows = u.chunks_exact_mut(uv_width);
+    let mut v_rows = v.chunks_exact_mut(uv_width);
+    for (((pixels, y), u), v) in (&mut pixel_row_pairs)
+        .zip(&mut y_row_pairs)
+        .zip(&mut u_rows)
+        .zip(&mut v_rows)
     {
-        debug_assert_eq!(y.len(), rgb_frame.len() / 3);
-        debug_assert!(rgb_frame.len() / 3 <= u32::MAX as usize);
-        let height = (rgb_frame.len() / 3 / usize::from(width.get())) as u16;
-        let uv_len = usize::from(width.get().div_ceil(2)) * usize::from(height.div_ceil(2));
-        debug_assert_eq!(u.len(), uv_len);
-        debug_assert_eq!(v.len(), uv_len);
+        let (pixels0, pixels1) = pixels.split_at(width);
+        let (y0, y1) = y.split_at_mut(width);
+        pixel_row_to_yuv420p(
+            pixels0,
+            y0,
+            u,
+            v,
+            &to_yuv,
+            |_, chroma0, chroma1| chroma0 + chroma1,
+            |_, chroma| chroma,
+        );
+        pixel_row_to_yuv420p(
+            pixels1,
+            y1,
+            u,
+            v,
+            &to_yuv,
+            |sum, chroma0, chroma1| quantize(sum + chroma0 + chroma1, 2),
+            |sum, chroma| quantize(sum + chroma, 1),
+        );
     }
-    let width = width.get();
-    let y_width = usize::from(width);
-    let uv_width = y_width.div_ceil(2);
-    let y_tiles = y.chunks_mut(2 * y_width);
-    let u_rows = u.chunks_exact_mut(uv_width);
-    let v_rows = v.chunks_exact_mut(uv_width);
-    let rgb_width = NUM_RGB_COMPONENTS * y_width;
-    let rgb_tiles = rgb_frame.chunks(2 * rgb_width);
-    for (((u_row, v_row), y_tile), rgb_tile) in u_rows.zip(v_rows).zip(y_tiles).zip(rgb_tiles) {
-        let (Some((y_row0, y_row1)), Some((rgb_row0, rgb_row1))) = (
-            y_tile.split_at_mut_checked(y_width),
-            rgb_tile.split_at_checked(rgb_width),
-        ) else {
-            // Can only happen if y/rgb_frame lengths are incorrect.
-            break;
-        };
-        // N.B. y_row1 and rgb_row1 might be empty, hence we iterate over them
-        // separately.
-        let mut y_row1_chunks = y_row1.chunks_mut(2);
-        let mut rgb_row1_chunks = rgb_row1.chunks(2 * NUM_RGB_COMPONENTS);
-        for (((u, v), y_row0_chunk), rgb_row0_chunk) in u_row
-            .iter_mut()
-            .zip(v_row.iter_mut())
-            .zip(y_row0.chunks_mut(2))
-            .zip(rgb_row0.chunks(2 * NUM_RGB_COMPONENTS))
-        {
-            let mut u_sum = 0;
-            let mut v_sum = 0;
-            // -1
-            let mut shift = !0_u8;
-            // First tile row.
-            for (y, rgb) in y_row0_chunk
-                .iter_mut()
-                .zip(rgb_row0_chunk.as_chunks::<NUM_RGB_COMPONENTS>().0)
-            {
-                let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
-                *y = yuv[0];
-                u_sum += yuv[1];
-                v_sum += yuv[2];
-                shift = shift.wrapping_add(1);
-            }
-            // Second tile row.
-            if let (Some(y_row1_chunk), Some(rgb_row1_chunk)) =
-                (y_row1_chunks.next(), rgb_row1_chunks.next())
-            {
-                for (y, rgb) in y_row1_chunk
-                    .iter_mut()
-                    .zip(rgb_row1_chunk.as_chunks::<NUM_RGB_COMPONENTS>().0)
-                {
-                    let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
-                    *y = yuv[0];
-                    u_sum += yuv[1];
-                    v_sum += yuv[2];
-                }
-                shift = shift.wrapping_add(1);
-            }
-            // Here we divide sum by count to compute average. This code works
-            // because tiles are 2x2 and we always increase shift by 1 in the
-            // second row (and when we process the first row we increase it
-            // either by 1 or 2); count can only be 1, 2 or 4.
-            *u = div_by_power_of_two(u_sum, shift);
-            *v = div_by_power_of_two(v_sum, shift);
+    if let (Some(u), Some(v)) = (u_rows.next(), v_rows.next()) {
+        pixel_row_to_yuv420p(
+            pixel_row_pairs.remainder(),
+            y_row_pairs.into_remainder(),
+            u,
+            v,
+            &to_yuv,
+            |_, chroma0, chroma1| quantize(chroma0 + chroma1, 1),
+            |_, chroma| chroma,
+        );
+    }
+}
+
+#[inline(always)]
+pub fn yuv420p_to_pixels<P>(
+    y: &[Sample],
+    u: &[Sample],
+    v: &[Sample],
+    width: NonZero<u16>,
+    pixels: &mut [P],
+    from_rgb: impl Fn(&mut P, [u8; 3]),
+) {
+    let width = usize::from(width.get());
+    let uv_width = width.div_ceil(2);
+    debug_assert_eq!(pixels.len(), y.len());
+    debug_assert_eq!(u.len(), uv_width * (y.len() / width).div_ceil(2));
+    debug_assert_eq!(u.len(), v.len());
+    let uv_rows = u.chunks_exact(uv_width).zip(v.chunks_exact(uv_width));
+    for ((pixels, y), (u, v)) in pixels
+        .chunks_exact_mut(width)
+        .zip(y.chunks_exact(width))
+        .zip(uv_rows.flat_map(|uv_row| [uv_row; 2]))
+    {
+        let (pixel_pairs, last_pixel) = pixels.as_chunks_mut::<2>();
+        let (y_pairs, last_y) = y.as_chunks::<2>();
+        for (((pixels, y), u), v) in pixel_pairs.iter_mut().zip(y_pairs).zip(u).zip(v) {
+            from_rgb(
+                &mut pixels[0],
+                yuv_to_rgb([y[0].current, u.current, v.current]),
+            );
+            from_rgb(
+                &mut pixels[1],
+                yuv_to_rgb([y[1].current, u.current, v.current]),
+            );
         }
-    }
-}
-
-/// Converts indexed RGB frame to planar YUV frame using [`rgb_to_yuv`] with
-/// 4:2:0 chroma subsampling.
-///
-/// If slices' lengths aren't correct the output is undefined; the function will
-/// only panic when debug assertions are enabled.
-pub fn rgb888_indexed8_to_yuv420p(
-    indexed_frame: &[u8],
-    width: NonZero<u16>,
-    y: &mut [i16],
-    u: &mut [i16],
-    v: &mut [i16],
-) {
-    let width = width.get();
-    let (palette, indices) = indexed_frame.split_at(NUM_RGB_COMPONENTS * 256);
-    let y_width = usize::from(width);
-    let uv_width = y_width.div_ceil(2);
-    let y_tiles = y.chunks_mut(2 * y_width);
-    let u_rows = u.chunks_exact_mut(uv_width);
-    let v_rows = v.chunks_exact_mut(uv_width);
-    let indices_width = y_width;
-    let indices_tiles = indices.chunks(2 * indices_width);
-    for (((u_row, v_row), y_tile), indices_tile) in
-        u_rows.zip(v_rows).zip(y_tiles).zip(indices_tiles)
-    {
-        let (Some((y_row0, y_row1)), Some((indices_row0, indices_row1))) = (
-            y_tile.split_at_mut_checked(y_width),
-            indices_tile.split_at_checked(indices_width),
-        ) else {
-            // Can only happen if y/indices lengths are incorrect.
-            break;
-        };
-        // N.B. y_row1 and indices_row1 might be empty, hence we iterate over
-        // them separately.
-        let mut y_row1_chunks = y_row1.chunks_mut(2);
-        let mut indices_row1_chunks = indices_row1.chunks(2);
-        for (((u, v), y_row0_chunk), indices_row0_chunk) in u_row
-            .iter_mut()
-            .zip(v_row.iter_mut())
-            .zip(y_row0.chunks_mut(2))
-            .zip(indices_row0.chunks(2))
-        {
-            let mut u_sum = 0;
-            let mut v_sum = 0;
-            // -1
-            let mut shift = !0_u8;
-            // First tile row.
-            for (y, index) in y_row0_chunk
-                .iter_mut()
-                .zip(indices_row0_chunk.iter().copied())
-            {
-                let rgb = [
-                    palette[NUM_RGB_COMPONENTS * usize::from(index)],
-                    palette[NUM_RGB_COMPONENTS * usize::from(index) + 1],
-                    palette[NUM_RGB_COMPONENTS * usize::from(index) + 2],
-                ];
-                let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
-                *y = yuv[0];
-                u_sum += yuv[1];
-                v_sum += yuv[2];
-                shift = shift.wrapping_add(1);
-            }
-            // Second tile row.
-            if let (Some(y_row1_chunk), Some(indices_row1_chunk)) =
-                (y_row1_chunks.next(), indices_row1_chunks.next())
-            {
-                for (y, index) in y_row1_chunk
-                    .iter_mut()
-                    .zip(indices_row1_chunk.iter().copied())
-                {
-                    let rgb = [
-                        palette[NUM_RGB_COMPONENTS * usize::from(index)],
-                        palette[NUM_RGB_COMPONENTS * usize::from(index) + 1],
-                        palette[NUM_RGB_COMPONENTS * usize::from(index) + 2],
-                    ];
-                    let yuv = rgb_to_yuv([rgb[0], rgb[1], rgb[2]]);
-                    *y = yuv[0];
-                    u_sum += yuv[1];
-                    v_sum += yuv[2];
-                }
-                shift = shift.wrapping_add(1);
-            }
-            // Here we divide sum by count to compute average. This code works
-            // because tiles are 2x2 and we always increase shift by 1 in the
-            // second row (and when we process the first row we increase it
-            // either by 1 or 2); count can only be 1, 2 or 4.
-            *u = div_by_power_of_two(u_sum, shift);
-            *v = div_by_power_of_two(v_sum, shift);
-        }
-    }
-}
-
-/// Converts YUV420p frame back to RGB.
-///
-/// If slices' lengths aren't correct the output is undefined and the function
-/// may or may not panic.
-pub fn yuv420p_to_rgb888(
-    y: &[i16],
-    u: &[i16],
-    v: &[i16],
-    width: NonZero<u16>,
-    rgb_frame: &mut [u8],
-) {
-    #[cfg(debug_assertions)]
-    {
-        debug_assert_eq!(y.len(), rgb_frame.len() / 3);
-        debug_assert!(rgb_frame.len() / 3 <= u32::MAX as usize);
-        let height = (rgb_frame.len() / 3 / usize::from(width.get())) as u16;
-        let uv_len = usize::from(width.get().div_ceil(2)) * usize::from(height.div_ceil(2));
-        debug_assert_eq!(u.len(), uv_len);
-        debug_assert_eq!(v.len(), uv_len);
-    }
-    let y_width = usize::from(width.get());
-    let rgb_width = NUM_RGB_COMPONENTS * y_width;
-    let uv_width = y_width.div_ceil(2);
-    let rgb_rows = rgb_frame.chunks_exact_mut(rgb_width);
-    let y_rows = y.chunks_exact(y_width);
-    for (i, (rgb_row, y_row)) in rgb_rows.zip(y_rows).enumerate() {
-        for (j, (rgb_out, y)) in rgb_row
-            .as_chunks_mut::<NUM_RGB_COMPONENTS>()
-            .0
-            .iter_mut()
-            .zip(y_row.iter().copied())
-            .enumerate()
-        {
-            // TODO u,v indexing can be optimized similar to rgb888_to_yuv420p
-            // to avoid slicing panicking
-            let k = (i / 2) * uv_width + (j / 2);
-            let rgb = yuv_to_rgb([y, u[k], v[k]]);
-            rgb_out[0] = rgb[0];
-            rgb_out[1] = rgb[1];
-            rgb_out[2] = rgb[2];
-        }
-    }
-}
-
-/// Converts YUV420p frame to RGBA.
-///
-/// If slices' lengths aren't correct the output is undefined and the function
-/// may or may not panic.
-pub fn yuv420p_to_rgba8888(
-    y: &[i16],
-    u: &[i16],
-    v: &[i16],
-    width: NonZero<u16>,
-    rgb_frame: &mut [u8],
-) {
-    #[cfg(debug_assertions)]
-    {
-        debug_assert_eq!(y.len(), rgb_frame.len() / 4);
-        debug_assert!(rgb_frame.len() / 4 <= u32::MAX as usize);
-        let height = (rgb_frame.len() / 4 / usize::from(width.get())) as u16;
-        let uv_len = usize::from(width.get().div_ceil(2)) * usize::from(height.div_ceil(2));
-        debug_assert_eq!(u.len(), uv_len);
-        debug_assert_eq!(v.len(), uv_len);
-    }
-    let y_width = usize::from(width.get());
-    let rgba_width = NUM_RGBA_COMPONENTS * y_width;
-    let uv_width = y_width.div_ceil(2);
-    let rgba_rows = rgb_frame.chunks_exact_mut(rgba_width);
-    let y_rows = y.chunks_exact(y_width);
-    for (i, (rgb_row, y_row)) in rgba_rows.zip(y_rows).enumerate() {
-        for (j, (rgba_out, y)) in rgb_row
-            .as_chunks_mut::<NUM_RGBA_COMPONENTS>()
-            .0
-            .iter_mut()
-            .zip(y_row.iter().copied())
-            .enumerate()
-        {
-            // TODO u,v indexing can be optimized similar to rgb888_to_yuv420p
-            // to avoid slicing panicking
-            let k = (i / 2) * uv_width + (j / 2);
-            let rgb = yuv_to_rgb([y, u[k], v[k]]);
-            rgba_out[0] = rgb[0];
-            rgba_out[1] = rgb[1];
-            rgba_out[2] = rgb[2];
-            rgba_out[3] = u8::MAX;
+        if let ([pixel], [y], Some(u), Some(v)) = (last_pixel, last_y, u.last(), v.last()) {
+            from_rgb(pixel, yuv_to_rgb([y.current, u.current, v.current]));
         }
     }
 }
@@ -351,7 +198,10 @@ pub fn yuv420p_dimensions(
 pub mod tests {
     use super::*;
     use crate::ToUsize;
-    use crate::video::yuv::tests::rgb_frame;
+    use crate::video::yuv::{
+        rgb_to_yuv,
+        tests::{currents, rgb_frame},
+    };
     use alloc::vec;
     use proptest::prelude::*;
 
@@ -371,18 +221,20 @@ pub mod tests {
             &mut u[..],
             &mut v[..],
         );
-        {
-            let mut y2 = [0; 2];
-            let mut u2 = [0; 1];
-            let mut v2 = [0; 1];
-            rgb888_to_yuv420p(&frame[..], width, &mut y2[..], &mut u2[..], &mut v2[..]);
-            assert_eq!(y, y2);
-            assert_eq!(u, u2);
-            assert_eq!(v, v2);
-        }
-        let mut actual = frame;
-        actual.fill(0);
-        yuv420p_to_rgb888(&y, &u, &v, width, &mut actual);
+        let mut y2 = [Sample::default(); 2];
+        let mut u2 = [Sample::default(); 1];
+        let mut v2 = [Sample::default(); 1];
+        pixels_to_yuv420p(
+            frame.as_chunks::<3>().0,
+            width,
+            &mut y2[..],
+            &mut u2[..],
+            &mut v2[..],
+            |rgb| rgb_to_yuv(*rgb),
+        );
+        assert_eq!(y, y2.map(|sample| sample.current));
+        assert_eq!(u, u2.map(|sample| sample.current));
+        assert_eq!(v, v2.map(|sample| sample.current));
     }
 
     #[test]
@@ -402,21 +254,26 @@ pub mod tests {
                 &mut u[..],
                 &mut v[..]
             );
-            {
-                let mut y2 = vec![0; y_len.to_usize()];
-                let mut u2 = vec![0; uv_len.to_usize()];
-                let mut v2 = vec![0; uv_len.to_usize()];
-                rgb888_to_yuv420p(&x[..], width, &mut y2[..], &mut u2[..], &mut v2[..]);
-                assert_eq!(y, y2);
-                assert_eq!(u, u2);
-                assert_eq!(v, v2);
-            }
+            let mut y2 = vec![Sample::default(); y_len.to_usize()];
+            let mut u2 = vec![Sample::default(); uv_len.to_usize()];
+            let mut v2 = vec![Sample::default(); uv_len.to_usize()];
+            pixels_to_yuv420p(x.as_chunks::<3>().0, width, &mut y2[..], &mut u2[..], &mut v2[..], |rgb| rgb_to_yuv(*rgb));
+            assert_eq!(y, currents(&y2));
+            assert_eq!(u, currents(&u2));
+            assert_eq!(v, currents(&v2));
             let mut actual = vec![0; x.len()];
             yuv420p_to_rgb888_old(&y, &u, &v, width.into(), &mut actual);
             {
+                let (y, u, v) = (&y2, &u2, &v2);
                 let mut actual2 = vec![0; x.len()];
-                yuv420p_to_rgb888(&y, &u, &v, width, &mut actual2);
+                yuv420p_to_pixels(y, u, v, width, actual2.as_chunks_mut::<3>().0, |pixel, rgb| *pixel = rgb);
                 assert_eq!(actual, actual2);
+                let mut actual_rgba = vec![0; x.len() / 3 * 4];
+                yuv420p_to_pixels(y, u, v, width, actual_rgba.as_chunks_mut::<4>().0, |pixel, [r, g, b]| {
+                    *pixel = [r, g, b, u8::MAX]
+                });
+                let expected_rgba: Vec<u8> = actual.as_chunks::<3>().0.iter().flat_map(|[r, g, b]| [*r, *g, *b, u8::MAX]).collect();
+                assert_eq!(expected_rgba, actual_rgba);
             }
         });
     }

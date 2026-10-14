@@ -1,3 +1,4 @@
 /target
 /wasm/docs
 /wasm/pkg
+/bench/guest/target

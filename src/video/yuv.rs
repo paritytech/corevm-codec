@@ -1,3 +1,5 @@
+use crate::video::Sample;
+use alloc::vec::Vec;
 use core::num::NonZero;
 
 mod dummy;
@@ -31,7 +33,7 @@ impl YuvFrame {
     }
 
     /// Returns _Y_, _U_, _V_ as mutable slices.
-    pub fn as_mut_slices(&mut self) -> (&mut [i16], &mut [i16], &mut [i16]) {
+    pub fn as_mut_slices(&mut self) -> (&mut [Sample], &mut [Sample], &mut [Sample]) {
         match self {
             Self::Yuv420p(frame) => frame.as_mut_slices(),
             Self::Yuv444p(frame) => frame.as_mut_slices(),
@@ -70,6 +72,90 @@ impl YuvFrame {
             Self::Dummy(..) => true,
         }
     }
+
+    pub fn previous_values(&self) -> Vec<i16> {
+        match self {
+            Self::Yuv420p(frame) => previous_values(frame.as_slices()),
+            Self::Yuv444p(frame) => previous_values(frame.as_slices()),
+            Self::Dummy(..) => Vec::new(),
+        }
+    }
+
+    pub fn set_previous_values(&mut self, values: &[i16]) {
+        let (y, u, v) = match self {
+            Self::Yuv420p(frame) => frame.as_mut_slices(),
+            Self::Yuv444p(frame) => frame.as_mut_slices(),
+            Self::Dummy(..) => return,
+        };
+        for (sample, value) in y.iter_mut().chain(u).chain(v).zip(values) {
+            sample.previous = *value;
+        }
+    }
+
+    #[inline(always)]
+    pub fn load_pixels<P>(
+        &mut self,
+        pixels: &[P],
+        width: NonZero<u16>,
+        to_yuv: impl Fn(&P) -> [i16; 3],
+    ) {
+        match self {
+            Self::Yuv420p(frame) => {
+                let (y, u, v) = frame.as_mut_slices();
+                pixels_to_yuv420p(pixels, width, y, u, v, to_yuv);
+            }
+            Self::Yuv444p(frame) => {
+                let (y, u, v) = frame.as_mut_slices();
+                pixels_to_yuv444p(pixels, y, u, v, to_yuv);
+            }
+            Self::Dummy(..) => unreachable!(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn store_pixels<P>(
+        &self,
+        pixels: &mut [P],
+        width: NonZero<u16>,
+        from_rgb: impl Fn(&mut P, [u8; 3]),
+    ) {
+        match self {
+            Self::Yuv420p(frame) => {
+                let (y, u, v) = frame.as_slices();
+                yuv420p_to_pixels(y, u, v, width, pixels, from_rgb);
+            }
+            Self::Yuv444p(frame) => {
+                let (y, u, v) = frame.as_slices();
+                yuv444p_to_pixels(y, u, v, pixels, from_rgb);
+            }
+            Self::Dummy(..) => unreachable!(),
+        }
+    }
+}
+
+fn previous_values((y, u, v): (&[Sample], &[Sample], &[Sample])) -> Vec<i16> {
+    y.iter()
+        .chain(u)
+        .chain(v)
+        .map(|sample| sample.previous)
+        .collect()
+}
+
+pub struct YuvPalette([u64; 256]);
+
+impl YuvPalette {
+    pub fn new(rgb_palette: &[[u8; 3]; 256]) -> Self {
+        Self(rgb_palette.map(|rgb| {
+            let [y, u, v] = rgb_to_yuv(rgb).map(|component| u64::from(component as u16));
+            y | (u << 16) | (v << 32)
+        }))
+    }
+
+    #[inline(always)]
+    pub fn get(&self, index: u8) -> [i16; 3] {
+        let entry = self.0[usize::from(index)];
+        [entry as i16, (entry >> 16) as i16, (entry >> 32) as i16]
+    }
 }
 
 #[cfg(test)]
@@ -103,9 +189,9 @@ pub fn rgb_to_yuv([r, g, b]: [u8; 3]) -> [i16; 3] {
 /// If YUV values are out-of-range, the result is undefined.
 #[inline]
 pub fn yuv_to_rgb([y, u, v]: [i16; 3]) -> [u8; 3] {
-    let g = y - ((u + v) >> 2) + 128;
-    let r = u + g;
-    let b = v + g;
+    let g = y.wrapping_sub(u.wrapping_add(v) >> 2).wrapping_add(128);
+    let r = u.wrapping_add(g);
+    let b = v.wrapping_add(g);
     [clamp_u8(r), clamp_u8(g), clamp_u8(b)]
 }
 
@@ -119,9 +205,6 @@ fn clamp_u8(value: i16) -> u8 {
     }
     value as u8
 }
-
-const NUM_RGB_COMPONENTS: usize = 3;
-const NUM_RGBA_COMPONENTS: usize = 4;
 
 #[cfg(test)]
 pub mod tests {
@@ -170,6 +253,21 @@ pub mod tests {
         assert_eq!(UV_MAX, max[1]);
         assert_eq!(UV_MIN, min[2]);
         assert_eq!(UV_MAX, max[2]);
+    }
+
+    #[test]
+    fn yuv_palette_works() {
+        proptest!(|(palette in collection::vec(any::<[u8; 3]>(), 256))| {
+            let palette: [[u8; 3]; 256] = palette.try_into().unwrap();
+            let yuv_palette = YuvPalette::new(&palette);
+            for (index, rgb) in palette.iter().enumerate() {
+                assert_eq!(rgb_to_yuv(*rgb), yuv_palette.get(index as u8));
+            }
+        });
+    }
+
+    pub fn currents(samples: &[Sample]) -> Vec<i16> {
+        samples.iter().map(|sample| sample.current).collect()
     }
 
     pub fn rgb_frame(

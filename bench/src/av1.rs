@@ -1,9 +1,8 @@
-use crate::QUAKE_FRAMES;
 use rav1e::prelude::*;
 
 mod bt709;
 
-pub fn transcode(width: u16, height: u16) {
+pub fn encode(frames: &[u8], width: u16, height: u16) -> usize {
     let mut speed_settings = SpeedSettings::from_preset(u8::MAX);
     speed_settings.rdo_lookahead_frames = 1;
     speed_settings.cdef = false;
@@ -20,7 +19,7 @@ pub fn transcode(width: u16, height: u16) {
         .with_threads(1)
         .with_encoder_config(encoder_config);
     let mut av1_context: Context<u8> = config.new_context().expect("new_context failed");
-    for rgb in QUAKE_FRAMES.chunks_exact(width as usize * height as usize * 3) {
+    for rgb in frames.chunks_exact(width as usize * height as usize * 3) {
         let mut frame = av1_context.new_frame();
         let (y, uv) = frame.planes.split_at_mut(1);
         let (u, v) = uv.split_at_mut(1);
@@ -47,9 +46,10 @@ pub fn transcode(width: u16, height: u16) {
         av1_context.send_frame(frame).expect("send_frame failed");
     }
     av1_context.flush();
+    let mut encoded_len = 0;
     loop {
         match av1_context.receive_packet() {
-            Ok(_packet) => {}
+            Ok(packet) => encoded_len += packet.data.len(),
             Err(EncoderStatus::Encoded) => {
                 // A frame was encoded without emitting a packet. This is
                 // normal, just proceed as usual.
@@ -80,4 +80,5 @@ pub fn transcode(width: u16, height: u16) {
             }
         }
     }
+    encoded_len
 }

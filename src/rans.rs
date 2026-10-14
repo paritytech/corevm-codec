@@ -1,15 +1,15 @@
-//! Range Assymertic Numeral System (rANS) encoder/decoder.
+//! Range Asymmetric Numeral System (rANS) encoder/decoder.
 
-use crate::{SliceOutput, errors};
+use crate::errors;
+use alloc::{boxed::Box, vec, vec::Vec};
 use jam_codec::{Compact, Decode, Encode};
 
 mod bitset;
 mod io;
-mod reciprocal;
 #[cfg(feature = "stats")]
 mod stats;
 
-use self::{bitset::FreqBitSet, reciprocal::*};
+use self::bitset::FreqBitSet;
 
 pub use self::io::*;
 #[cfg(feature = "stats")]
@@ -31,19 +31,17 @@ pub const MAX_INPUT_LEN: usize = u32::MAX as usize;
 pub(crate) const NUM_FREQS: usize = 256;
 // Total number of cumulative frequencies.
 const NUM_CFREQS: usize = NUM_FREQS + 1;
+const SCALE_BITS: u32 = 12;
 // The sum of all frequencies.
-const SUM_FREQ: u32 = 2_u32.pow(14);
-const INITIAL_STATE: u32 = 2_u32.pow(23);
-// This number is artificial since it's difficult to estimate the actual maximum
-// footer length.
-const FOOTER_BUF_LEN: usize = 512;
+const SUM_FREQ: u32 = 1 << SCALE_BITS;
+const FIELD_MASK: u64 = (1 << SCALE_BITS) - 1;
+const WORD_BITS: u32 = Word::BITS;
+const STATE_LOWER_BOUND: u64 = 1 << 16;
+const RENORMALIZATION_SHIFT: u32 = STATE_LOWER_BOUND.ilog2() - SCALE_BITS + WORD_BITS;
 
 type RawFrequencies = [u32; NUM_FREQS];
 type NormalizedFrequencies = [u16; NUM_FREQS];
 type CumulativeFrequencies = [u16; NUM_CFREQS];
-
-// Sanity checks.
-const _: () = assert!(INITIAL_STATE.is_multiple_of(SUM_FREQ));
 
 /// Calculates the number of occurences of each byte in the provided buffer.
 fn symbol_frequencies(input: &[u8]) -> RawFrequencies {
@@ -55,76 +53,46 @@ fn symbol_frequencies(input: &[u8]) -> RawFrequencies {
     freqs
 }
 
+const MIN_FREQUENCY: u16 = 1;
+
 /// Normalizes symbol frequencies.
 ///
-/// Makes their sum equal to `SUM_FREQ`. Returns normalized frequencies and a
-/// set of indices of non-zero frequencies.
-fn normalize_frequencies(mut freqs: RawFrequencies) -> (NormalizedFrequencies, FreqBitSet) {
-    let sum: u32 = freqs.iter().copied().sum();
+/// Makes their sum equal to `SUM_FREQ` and every non-zero frequency at least
+/// `MIN_FREQUENCY`. Returns normalized frequencies and a set of indices of
+/// non-zero frequencies.
+fn normalize_frequencies(counts: RawFrequencies) -> (NormalizedFrequencies, FreqBitSet) {
+    let total: u64 = counts.iter().copied().map(u64::from).sum();
+    let mut freqs = [0; NUM_FREQS];
     let mut non_zero_freqs = FreqBitSet::new();
-    if sum == 0 {
-        return ([0; NUM_FREQS], non_zero_freqs);
+    if total == 0 {
+        return (freqs, non_zero_freqs);
     }
-    let mut sum_remaining = SUM_FREQ;
-    let mut sum_extra: u32 = 0;
-    let mut non_zero_freq_len: u16 = 0;
-    for (i, f) in freqs.iter_mut().enumerate() {
-        if *f == 0 {
+    let scale = (u64::from(SUM_FREQ) << 32) / total;
+    let mut sum: u32 = 0;
+    for (i, (count, freq)) in counts.iter().zip(freqs.iter_mut()).enumerate() {
+        if *count == 0 {
             continue;
         }
-        let mut f_new = (u64::from(*f) * u64::from(SUM_FREQ) / u64::from(sum)) as u32;
-        if sum_remaining < f_new {
-            f_new = sum_remaining;
-        }
-        if f_new == 0 {
-            // Can only happen if `sum > SUM_FREQ`.
-            *f = 1;
-            if sum_remaining == 0 {
-                sum_extra += 1;
-            } else {
-                sum_remaining -= 1;
-            }
-        } else {
-            *f = f_new;
-            sum_remaining -= f_new;
-        }
+        let scaled = (u64::from(*count) * scale + (1 << 31)) >> 32;
+        *freq = (scaled as u16).max(MIN_FREQUENCY);
+        sum += u32::from(*freq);
         non_zero_freqs.set(i);
-        non_zero_freq_len += 1;
     }
-    // Spread evenly.
-    if sum_remaining != 0 {
-        let n = u32::from(non_zero_freq_len).min(sum_remaining);
-        let df = sum_remaining.div_ceil(n);
-        for i in non_zero_freqs.iter() {
-            let f = &mut freqs[i];
-            if df <= sum_remaining {
-                *f += sum_remaining;
-                break;
-            }
-            *f += df;
-            sum_remaining -= df;
+    while sum != SUM_FREQ {
+        let largest = freqs
+            .iter_mut()
+            .max_by_key(|freq| **freq)
+            .expect("non-empty frequencies");
+        if sum < SUM_FREQ {
+            *largest += (SUM_FREQ - sum) as u16;
+            sum = SUM_FREQ;
+        } else {
+            let decrease = (sum - SUM_FREQ).min(u32::from(*largest - MIN_FREQUENCY));
+            *largest -= decrease as u16;
+            sum -= decrease;
         }
     }
-    // Spread evenly.
-    'outer: while sum_extra != 0 {
-        for i in non_zero_freqs.iter() {
-            let f = &mut freqs[i];
-            if *f == 1 {
-                continue;
-            }
-            *f -= 1;
-            sum_extra -= 1;
-            if sum_extra == 0 {
-                break 'outer;
-            }
-        }
-    }
-    let mut freqs_u16 = [0; NUM_FREQS];
-    for (f0, f1) in freqs_u16.iter_mut().zip(freqs.iter()) {
-        debug_assert!(*f1 <= u32::from(u16::MAX));
-        *f0 = *f1 as u16;
-    }
-    (freqs_u16, non_zero_freqs)
+    (freqs, non_zero_freqs)
 }
 
 /// Calculates cumulative frequencies from normalized ones.
@@ -140,175 +108,176 @@ fn cumulative_frequencies(freqs: &NormalizedFrequencies) -> CumulativeFrequencie
     cfreqs
 }
 
-pub fn encode(input: &[u8], output: &mut impl Output) -> Stats {
-    let mut encoder = Encoder::new(input);
-    encoder.write_rev(input, output);
-    encoder.finish(output)
-}
-
-pub fn decode(input: &mut impl Input, output: &mut [u8]) -> Result<(), InvalidRansStream> {
-    let mut decoder = Decoder::new(input)?;
-    decoder.read_exact(input, output)
-}
-
-/// This is a range variant of Assymertic Numeral System (RANS) encoder that
-/// uses _byte_ as a symbol.
-///
-/// The encoder operates as a stack of symbols, i.e. the symbol that was encoded
-/// last is decoded first. In other words, the input should be encoded in
-/// reverse order if you want to decode it in normal order.
-///
-/// The code is based on <https://github.com/rygorous/ryg_rans> with some improvements.
-/// The original paper is here: <https://arxiv.org/pdf/1311.2540>.
-///
-/// # Interleaved output
-///
-/// Several encoders can use the same output to interleave different data
-/// streams. This is useful when you want to encode different portions of a data
-/// frame in separate streams to improve compression ratio, but at the same time
-/// you want to decode the data that is related to the same frame without
-/// decoding the whole streams.
-///
-/// For example, if you want to encode `x` and `y` as separate streams but
-/// decode `x` and `y` related to the same frame together you could do the
-/// following.
-///
-/// ```ignore
-/// // Encoder side: frames in _reverse_ order, encoders in normal order.
-/// for frame in frames.iter().rev() {
-///     x_encoder.write_rev(&frame.x, same_output)?;
-///     y_encoder.write_rev(&frame.y, same_output)?;
-/// }
-/// x_encoder.finish(same_output)?;
-/// y_encoder.finish(same_output)?;
-///
-/// // Decoder side: frames in normal order, decoders in _reverse_ order.
-/// for frame in frames.iter_mut() {
-///     y_decoder.read_exact(same_input, &mut frame.y[..])?;
-///     x_decoder.read_exact(same_input, &mut frame.x[..])?;
-/// }
-/// ```
-pub struct Encoder {
-    state: u32,
-    cfreqs: CumulativeFrequencies,
-    reciprocals: Reciprocals<NUM_FREQS>,
+pub struct FrequencyTable {
+    freqs: NormalizedFrequencies,
     non_zero_freqs: FreqBitSet,
-    #[cfg(feature = "stats")]
-    total_out: u32,
 }
 
-impl Encoder {
-    /// Creates new encoder from the provided input.
-    ///
-    /// `input` _must_ contain all input that you plan to write to the encoder
-    /// via [`write_rev`](Self::write_rev) in order to correctly determine
-    /// symbol frequencies.
-    ///
-    /// Panics if the input size exceeds [`MAX_INPUT_LEN`].
-    pub fn new(input: &[u8]) -> Self {
-        let input_len = input.len();
-        if input_len > MAX_INPUT_LEN {
-            panic!("Too large input");
-        }
-        let freqs = symbol_frequencies(input);
-        Self::from_frequencies_unchecked(freqs)
-    }
-
-    pub fn from_frequencies(freqs: RawFrequencies) -> Self {
-        assert!(freqs.iter().copied().map(u64::from).sum::<u64>() <= u64::from(u32::MAX));
-        Self::from_frequencies_unchecked(freqs)
-    }
-
-    fn from_frequencies_unchecked(freqs: RawFrequencies) -> Self {
-        let (freqs, non_zero_freqs) = normalize_frequencies(freqs);
-        let cfreqs = cumulative_frequencies(&freqs);
-        let reciprocals = Reciprocals::from_frequencies(&freqs);
+impl FrequencyTable {
+    pub fn new(counts: RawFrequencies) -> Self {
+        let (freqs, non_zero_freqs) = normalize_frequencies(counts);
         Self {
-            state: INITIAL_STATE,
-            cfreqs,
-            reciprocals,
+            freqs,
             non_zero_freqs,
-            #[cfg(feature = "stats")]
-            total_out: 0,
         }
     }
 
-    /// Encode next input chunk.
-    ///
-    /// - Chunks _must_ be fed into the encoder in reverse order if you want to
-    ///   decode them in normal order.
-    /// - Chunks _must_ be part of the original input provided via
-    ///   [`Self::new`].
-    pub fn write_rev(&mut self, input: &[u8], output: &mut impl Output) {
-        for symbol in input.iter().rev() {
-            self.push(*symbol, output);
+    pub fn frequency(&self, symbol: u8) -> u16 {
+        self.freqs[usize::from(symbol)]
+    }
+
+    pub fn len(&self) -> usize {
+        self.non_zero_freqs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Encode for FrequencyTable {
+    fn encode_to<O: jam_codec::Output + ?Sized>(&self, output: &mut O) {
+        self.non_zero_freqs.encode_to(output);
+        for i in self.non_zero_freqs.iter() {
+            Compact(self.freqs[i]).encode_to(output);
+        }
+    }
+}
+
+impl Decode for FrequencyTable {
+    fn decode<I: jam_codec::Input>(input: &mut I) -> Result<Self, jam_codec::Error> {
+        let non_zero_freqs = FreqBitSet::decode(input)?;
+        let mut freqs = [0; NUM_FREQS];
+        let mut sum_freqs: u32 = 0;
+        for i in non_zero_freqs.iter() {
+            let Compact(f) = Compact::<u16>::decode(input)?;
+            if f == 0 {
+                return Err("Zero frequency".into());
+            }
+            freqs[i] = f;
+            sum_freqs += u32::from(f);
+        }
+        if sum_freqs != 0 && sum_freqs != SUM_FREQ {
+            return Err("Invalid frequencies".into());
+        }
+        Ok(Self {
+            freqs,
+            non_zero_freqs,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct EncoderSymbol(u64);
+
+const FREQUENCY_OFFSET: u32 = u16::BITS;
+const RECIPROCAL_OFFSET: u32 = u32::BITS;
+
+impl EncoderSymbol {
+    fn new(cumulative_frequency: u16, frequency: u16) -> Self {
+        debug_assert!(frequency >= MIN_FREQUENCY);
+        let shift = u16::BITS - (frequency - 1).leading_zeros();
+        let reciprocal =
+            (1_u64 << (u32::BITS + shift)).div_ceil(u64::from(frequency)) - (1 << u32::BITS);
+        Self(
+            u64::from(cumulative_frequency)
+                | (u64::from(frequency - 1) << FREQUENCY_OFFSET)
+                | (reciprocal << RECIPROCAL_OFFSET),
+        )
+    }
+
+    #[inline(always)]
+    fn bias(self) -> u64 {
+        u64::from(self.0 as u16)
+    }
+
+    #[inline(always)]
+    fn frequency_minus_one(self) -> u64 {
+        u64::from(self.0 as u32 >> FREQUENCY_OFFSET)
+    }
+
+    #[inline(always)]
+    fn is_full(self, state: u64) -> bool {
+        state >> RENORMALIZATION_SHIFT > self.frequency_minus_one()
+    }
+
+    #[inline(always)]
+    fn quotient(self, state: u64) -> u64 {
+        let reciprocal = self.0 >> RECIPROCAL_OFFSET;
+        let shift = u64::BITS - self.frequency_minus_one().leading_zeros();
+        (((state * reciprocal) >> u32::BITS) + state) >> shift
+    }
+
+    #[inline(always)]
+    fn encode(self, state: u64) -> u64 {
+        let quotient = self.quotient(state);
+        let remainder = state - quotient * (self.frequency_minus_one() + 1);
+        (quotient << SCALE_BITS) + remainder + self.bias()
+    }
+}
+
+pub struct Encoder<const TABLES: usize> {
+    state: u64,
+    symbols: [[EncoderSymbol; NUM_FREQS]; TABLES],
+}
+
+impl<const TABLES: usize> Default for Encoder<TABLES> {
+    fn default() -> Self {
+        Self {
+            state: STATE_LOWER_BOUND,
+            symbols: [[EncoderSymbol::default(); NUM_FREQS]; TABLES],
+        }
+    }
+}
+
+impl<const TABLES: usize> Encoder<TABLES> {
+    pub fn reset(&mut self, tables: &[FrequencyTable; TABLES]) {
+        self.state = STATE_LOWER_BOUND;
+        for (symbols, table) in self.symbols.iter_mut().zip(tables) {
+            let cfreqs = cumulative_frequencies(&table.freqs);
+            for i in table.non_zero_freqs.iter() {
+                symbols[i] = EncoderSymbol::new(cfreqs[i], table.freqs[i]);
+            }
         }
     }
 
     /// Encode individual symbol.
-    pub fn push(&mut self, symbol: u8, output: &mut impl Output) {
-        let i = usize::from(symbol);
-        let freq = u32::from(self.freq(i));
-        debug_assert_ne!(0, freq);
-        let max = INITIAL_STATE / SUM_FREQ * 256 * freq;
-        while self.state >= max {
-            output.push((self.state & 0xff) as u8);
-            self.state >>= 8;
-            #[cfg(feature = "stats")]
-            {
-                self.total_out += 1;
+    #[inline(always)]
+    fn push(&mut self, (table, symbol): (usize, u8), window: &mut WordWindow<'_>) {
+        let symbol = self.symbols[table][usize::from(symbol)];
+        debug_assert_ne!(0, symbol.0);
+        let state = self.state;
+        let is_full = symbol.is_full(state);
+        window.push_if(state as Word, is_full);
+        let state = if is_full { state >> WORD_BITS } else { state };
+        self.state = symbol.encode(state);
+    }
+
+    #[inline(always)]
+    pub fn push_all<T>(
+        &mut self,
+        items: &[T],
+        words: &mut WordStack,
+        symbol: impl Fn(&T) -> (usize, u8),
+    ) {
+        let (pairs, last) = items.as_chunks::<2>();
+        words.write_window(|window| {
+            if let [item] = last {
+                self.push(symbol(item), window);
             }
-        }
-        let cfreq = u32::from(self.cfreqs[i]);
-        let freq_reciprocal = self.reciprocals.get(i);
-        // Calculate self.state / freq.
-        let quot = self.state.reciprocal_div(freq_reciprocal);
-        // Calculate self.state % freq.
-        let rem = self.state - quot * freq;
-        self.state = quot * SUM_FREQ + rem + cfreq;
-    }
-
-    /// Finish writing to the stream.
-    ///
-    /// This method must be called after all data has been written to the
-    /// stream.
-    ///
-    /// Panics when less number of bytes were written via
-    /// [`write_rev`](Self::write_rev) than were supplied to [`Self::new`].
-    ///
-    /// Returns stream statistics when `stats` feature is enabled.
-    pub fn finish(self, output: &mut impl Output) -> Stats {
-        let mut buf = [0_u8; FOOTER_BUF_LEN];
-        let mut footer = SliceOutput(&mut buf[..]);
-        Compact(self.state).encode_to(&mut footer);
-        self.non_zero_freqs.encode_to(&mut footer);
-        // TODO we don't need to write the last/first frequency because we know
-        // their sum
-        for i in self.non_zero_freqs.iter() {
-            let f = self.freq(i);
-            Compact(f).encode_to(&mut footer);
-        }
-        let footer_len = FOOTER_BUF_LEN - footer.0.len();
-        let footer = &mut buf[..footer_len];
-        // We write the footer in reverse to not encode its length: we read it
-        // in reverse too.
-        footer.reverse();
-        output.push_slice_rev(footer);
-        #[cfg(not(feature = "stats"))]
-        {
-            Stats
-        }
-        #[cfg(feature = "stats")]
-        Stats {
-            data_len: self.total_out.into(),
-            footer_len: footer_len as u32,
-            num_freqs: self.non_zero_freqs.len() as u32,
-            count: 1,
+        });
+        for window_pairs in pairs.rchunks(WINDOW_LEN / 2) {
+            words.write_window(|window| {
+                for [item0, item1] in window_pairs.iter().rev() {
+                    self.push(symbol(item1), window);
+                    self.push(symbol(item0), window);
+                }
+            });
         }
     }
 
-    fn freq(&self, i: usize) -> u16 {
-        self.cfreqs[i + 1] - self.cfreqs[i]
+    pub fn state(&self) -> u32 {
+        self.state as u32
     }
 }
 
@@ -323,122 +292,231 @@ impl From<jam_codec::Error> for InvalidRansStream {
     }
 }
 
-/// This is a range variant of Assymertic Numeral System (RANS) decoder.
-///
-/// See [`Encoder`] for more information.
-pub struct Decoder {
-    state: u32,
-    cfreqs: CumulativeFrequencies,
+const SLOT_FREQUENCY_OFFSET: u32 = u8::BITS;
+const SLOT_OFFSET_OFFSET: u32 = SLOT_FREQUENCY_OFFSET + SCALE_BITS;
+pub struct DecoderTables<const TABLES: usize> {
+    slots: Box<[[u32; SUM_FREQ as usize]; TABLES]>,
 }
 
-impl Decoder {
-    /// Creates new decoder for the provided input.
-    pub fn new(input: &mut impl Input) -> Result<Self, InvalidRansStream> {
-        let footer = &mut AnsInputAsJamInput(input);
-        let Compact(state) = Compact::<u32>::decode(footer)?;
-        // TODO check state
-        let non_zero_freqs = FreqBitSet::decode(footer)?;
-        let mut freqs = [0; NUM_FREQS];
-        let mut sum_freqs: u32 = 0;
-        let mut has_freqs = false;
-        for i in non_zero_freqs.iter() {
-            let Compact(f) = Compact::<u16>::decode(footer)?;
-            freqs[i] = f;
-            sum_freqs += u32::from(f);
-            has_freqs = true;
+impl<const TABLES: usize> Default for DecoderTables<TABLES> {
+    fn default() -> Self {
+        Self {
+            slots: vec![[0; SUM_FREQ as usize]; TABLES]
+                .into_boxed_slice()
+                .try_into()
+                .expect("invalid table count"),
         }
-        if has_freqs && sum_freqs != SUM_FREQ {
-            // Invalid frequencies.
+    }
+}
+
+impl<const TABLES: usize> DecoderTables<TABLES> {
+    pub fn fill(&mut self, tables: &[FrequencyTable; TABLES]) {
+        for (slots, table) in self.slots.iter_mut().zip(tables) {
+            let mut slots = &mut slots[..];
+            for symbol in table.non_zero_freqs.iter() {
+                let frequency = table.freqs[symbol];
+                let (run, rest) = slots.split_at_mut(usize::from(frequency));
+                let mut entry = symbol as u32 | (u32::from(frequency - 1) << SLOT_FREQUENCY_OFFSET);
+                let (chunks, remainder) = run.as_chunks_mut::<8>();
+                for chunk in chunks {
+                    for slot in chunk {
+                        *slot = entry;
+                        entry = entry.wrapping_add(1 << SLOT_OFFSET_OFFSET);
+                    }
+                }
+                for slot in remainder {
+                    *slot = entry;
+                    entry = entry.wrapping_add(1 << SLOT_OFFSET_OFFSET);
+                }
+                slots = rest;
+            }
+        }
+    }
+}
+
+pub struct Decoder<'a, const TABLES: usize> {
+    state: u64,
+    tables: &'a DecoderTables<TABLES>,
+}
+
+impl<'a, const TABLES: usize> Decoder<'a, TABLES> {
+    pub fn new(state: u32, tables: &'a DecoderTables<TABLES>) -> Result<Self, InvalidRansStream> {
+        let state = u64::from(state);
+        if state < STATE_LOWER_BOUND {
             return Err(InvalidRansStream);
         }
-        let cfreqs = cumulative_frequencies(&freqs);
-        Ok(Self { state, cfreqs })
-    }
-
-    /// Decodes `output.len()` bytes from the `input` and copies them to
-    /// `output`.
-    pub fn read_exact(
-        &mut self,
-        input: &mut impl Input,
-        mut output: &mut [u8],
-    ) -> Result<(), InvalidRansStream> {
-        while !output.is_empty() {
-            let symbol = self.pop(input)?;
-            output[0] = symbol;
-            output = &mut output[1..];
-        }
-        Ok(())
+        Ok(Self { state, tables })
     }
 
     /// Decode individual symbol.
-    pub fn pop(&mut self, input: &mut impl Input) -> Result<u8, InvalidRansStream> {
-        const MASK: u32 = SUM_FREQ - 1;
-        let cf = (self.state & MASK) as u16;
-        let symbol = self.cfreq_to_symbol(cf).ok_or(InvalidRansStream)?;
-        let i = usize::from(symbol);
-        let freq = u32::from(self.freq(i));
-        debug_assert_ne!(0, freq);
-        let cfreq = u32::from(self.cfreqs[i]);
-        self.state = (self.state / SUM_FREQ) * freq + (self.state & MASK) - cfreq;
-        while self.state < INITIAL_STATE {
-            let byte = input.pop().map_err(|_| InvalidRansStream)?;
-            self.state = (self.state << 8) | u32::from(byte);
+    #[inline(always)]
+    fn pop(&mut self, table: usize, window: &mut ReverseWordWindow<'_>) -> u8 {
+        let word = window.peek();
+        let slot = u64::from(self.tables.slots[table][(self.state & FIELD_MASK) as usize]);
+        let frequency = ((slot >> SLOT_FREQUENCY_OFFSET) & FIELD_MASK) + 1;
+        let offset = slot >> SLOT_OFFSET_OFFSET;
+        let state = frequency * (self.state >> SCALE_BITS) + offset;
+        let is_empty = state < STATE_LOWER_BOUND;
+        self.state = if is_empty {
+            (state << WORD_BITS) | u64::from(word)
+        } else {
+            state
+        };
+        window.skip(usize::from(is_empty));
+        slot as u8
+    }
+
+    #[inline(always)]
+    pub fn pop_all<T>(
+        &mut self,
+        items: &mut [T],
+        stream: &mut StreamReader<'_>,
+        table: impl Fn(&T) -> usize,
+        mut set: impl FnMut(&mut T, u8),
+    ) {
+        let (chunks, remainder) = items.as_chunks_mut::<4>();
+        for window_chunks in chunks.chunks_mut(WINDOW_LEN / 4) {
+            stream.read_window(|window| {
+                for chunk in window_chunks {
+                    for item in chunk {
+                        let symbol = self.pop(table(item), window);
+                        set(item, symbol);
+                    }
+                }
+            });
         }
-        Ok(symbol)
+        stream.read_window(|window| {
+            for item in remainder {
+                let symbol = self.pop(table(item), window);
+                set(item, symbol);
+            }
+        });
     }
 
-    fn cfreq_to_symbol(&self, cf: u16) -> Option<u8> {
-        self.cfreqs
-            .iter()
-            .skip(1)
-            .position(|cfreq| cf < *cfreq)
-            .map(|i| i as u8)
+    pub fn finish(self) -> Result<(), InvalidRansStream> {
+        if self.state != STATE_LOWER_BOUND {
+            return Err(InvalidRansStream);
+        }
+        Ok(())
     }
+}
 
-    fn freq(&self, i: usize) -> u16 {
-        self.cfreqs[i + 1] - self.cfreqs[i]
+pub fn encode(input: &[u8], words: &mut WordStack, header: &mut Vec<u8>) {
+    let tables = [FrequencyTable::new(symbol_frequencies(input))];
+    let mut encoder = Encoder::default();
+    encoder.reset(&tables);
+    let start = words.len();
+    encoder.push_all(input, words, |symbol| (0, *symbol));
+    encode_stream_header(encoder.state(), words.len() - start, &tables, header);
+}
+
+pub fn decode(
+    header: &StreamHeader<1>,
+    words: &mut WordReader<'_>,
+    output: &mut [u8],
+    tables: &mut DecoderTables<1>,
+) -> Result<(), InvalidRansStream> {
+    if header.tables[0].is_empty() && !output.is_empty() {
+        return Err(InvalidRansStream);
+    }
+    tables.fill(&header.tables);
+    let mut decoder = Decoder::new(header.state, tables)?;
+    let mut stream = words.stream(header.word_count)?;
+    decoder.pop_all(output, &mut stream, |_| 0, |byte, symbol| *byte = symbol);
+    stream.finish()?;
+    decoder.finish()
+}
+
+pub fn encode_stream_header<const TABLES: usize>(
+    state: u32,
+    word_count: usize,
+    tables: &[FrequencyTable; TABLES],
+    output: &mut impl jam_codec::Output,
+) {
+    state.encode_to(output);
+    Compact(word_count as u32).encode_to(output);
+    tables.encode_to(output);
+}
+
+pub struct StreamHeader<const TABLES: usize> {
+    pub state: u32,
+    pub word_count: u32,
+    pub tables: [FrequencyTable; TABLES],
+}
+
+impl<const TABLES: usize> Decode for StreamHeader<TABLES> {
+    fn decode<I: jam_codec::Input>(input: &mut I) -> Result<Self, jam_codec::Error> {
+        Ok(Self {
+            state: Decode::decode(input)?,
+            word_count: Compact::<u32>::decode(input)?.0,
+            tables: Decode::decode(input)?,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
     use proptest::prelude::*;
+
+    fn assert_round_trip(input: &[u8]) {
+        let mut words = WordStack::default();
+        let mut encoded_header = Vec::new();
+        encode(input, &mut words, &mut encoded_header);
+        let header = StreamHeader::decode(&mut &encoded_header[..]).unwrap();
+        let mut buffer = WordBuffer::default();
+        buffer
+            .read_from(&mut words.as_bytes(), words.len())
+            .unwrap();
+        let mut decoded = vec![0; input.len()];
+        decode(
+            &header,
+            &mut buffer.reader(),
+            &mut decoded,
+            &mut DecoderTables::default(),
+        )
+        .unwrap();
+        assert_eq!(input, decoded.as_slice());
+    }
 
     #[test]
     fn encoder_simple_works() {
-        let input = "Hello world!".as_bytes();
-        let mut encoder = Encoder::new(input);
-        let mut output = Vec::new();
-        encoder.write_rev(input, &mut output);
-        let encoder_state = encoder.state;
-        let encoder_cfreqs = encoder.cfreqs;
-        encoder.finish(&mut output);
-        let mut decoder = Decoder::new(&mut output).unwrap();
-        assert_eq!(encoder_state, decoder.state);
-        assert_eq!(encoder_cfreqs, decoder.cfreqs);
-        let mut decoded = vec![0; input.len()];
-        decoder.read_exact(&mut output, &mut decoded[..]).unwrap();
-        assert_eq!(input, decoded.as_slice());
+        assert_round_trip("Hello world!".as_bytes());
+    }
+
+    #[test]
+    fn single_symbol_round_trip() {
+        assert_round_trip(&[42; 100]);
     }
 
     #[test]
     fn encoder_works() {
         proptest!(|(input: Vec<u8>)| {
-            let mut encoder = Encoder::new(&input);
-            let mut output = Vec::new();
-            encoder.write_rev(&input, &mut output);
-            let encoder_state = encoder.state;
-            let encoder_cfreqs = encoder.cfreqs;
-            encoder.finish(&mut output);
-            let mut decoder = Decoder::new(&mut output).unwrap();
-            assert_eq!(encoder_state, decoder.state);
-            assert_eq!(encoder_cfreqs, decoder.cfreqs);
-            let mut decoded = vec![0; input.len()];
-            decoder.read_exact(&mut output, &mut decoded[..]).unwrap();
-            assert_eq!(input, decoded.as_slice());
+            assert_round_trip(&input);
         });
+    }
+
+    #[test]
+    fn encoder_skewed_input_works() {
+        proptest!(|(input in proptest::collection::vec(prop_oneof![9 => Just(0_u8), 1 => any::<u8>()], 0..5000))| {
+            assert_round_trip(&input);
+        });
+    }
+
+    #[test]
+    fn encoder_symbol_quotient_is_exact() {
+        for frequency in MIN_FREQUENCY..=SUM_FREQ as u16 {
+            let symbol = EncoderSymbol::new(0, frequency);
+            let frequency = u64::from(frequency);
+            let max_state = (frequency << RENORMALIZATION_SHIFT) - 1;
+            let states = (STATE_LOWER_BOUND >> WORD_BITS..frequency.min(4096))
+                .chain((max_state - frequency.min(4096))..=max_state)
+                .chain((0..=max_state).step_by((max_state / 4096) as usize));
+            for state in states {
+                assert_eq!(state / frequency, symbol.quotient(state));
+            }
+        }
     }
 
     #[test]
@@ -451,40 +529,28 @@ mod tests {
 
     #[test]
     fn normalize_frequencies_works() {
-        proptest!(|(input: Vec<u8>)| {
-            let freqs = symbol_frequencies(&input);
-            let (freqs, _non_zero_freqs) = normalize_frequencies(freqs);
-            let sum = freqs.iter().copied().sum::<u16>();
-            assert!(input.is_empty() || SUM_FREQ == u32::from(sum), "sum = {sum}, freqs = {freqs:?}");
+        proptest!(|(counts in proptest::collection::vec(prop_oneof![1 => Just(0_u32), 1 => 0..10_u32, 1 => any::<u32>().prop_map(|count| count >> 8)], NUM_FREQS))| {
+            let counts: RawFrequencies = counts.try_into().unwrap();
+            let (freqs, non_zero_freqs) = normalize_frequencies(counts);
+            let has_counts = counts.iter().any(|count| *count != 0);
+            assert_eq!(has_counts, freqs.iter().map(|freq| u32::from(*freq)).sum::<u32>() == SUM_FREQ);
+            for (i, (count, freq)) in counts.iter().zip(freqs).enumerate() {
+                assert_eq!(*count != 0, freq >= MIN_FREQUENCY);
+                assert_eq!(*count == 0, freq == 0);
+                assert_eq!(*count != 0, non_zero_freqs.iter().any(|j| i == j));
+            }
         });
     }
 
     #[test]
     fn normalize_frequencies_edge_cases() {
-        let mut freqs = [1_u32; NUM_FREQS];
-        freqs[0] = SUM_FREQ;
-        let (freqs, _non_zero_freqs) = normalize_frequencies(freqs);
-        let sum = freqs.iter().copied().sum::<u16>();
-        assert!(
-            SUM_FREQ == u32::from(sum),
-            "sum = {sum}, SUM_FREQ = {SUM_FREQ}, freqs = {freqs:?}"
+        let mut counts = [1_u32; NUM_FREQS];
+        counts[0] = u32::MAX - 255;
+        let (freqs, _non_zero_freqs) = normalize_frequencies(counts);
+        assert_eq!(
+            SUM_FREQ,
+            freqs.iter().map(|freq| u32::from(*freq)).sum::<u32>()
         );
-    }
-
-    #[test]
-    fn max_footer_len_is_correct() {
-        // Try to produce the longest possible footer.
-        for step in 1..=3 {
-            let input: Vec<u8> = (0..u8::MAX).step_by(step).collect();
-            let mut encoder = Encoder::new(&input);
-            let mut output = Vec::new();
-            encoder.state = u32::MAX;
-            encoder.finish(&mut output);
-            assert!(
-                output.len() <= FOOTER_BUF_LEN,
-                "output length = {}",
-                output.len()
-            );
-        }
+        assert!(freqs.iter().all(|freq| *freq >= MIN_FREQUENCY));
     }
 }

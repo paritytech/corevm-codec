@@ -1,19 +1,23 @@
 //! Video codec.
 
-use crate::{Input, Output, errors, rans, timer_finish, timer_start};
+use crate::{
+    Input, Output, errors, rans,
+    rans::{WordBuffer, WordStack},
+    timer_finish, timer_start,
+};
 use alloc::{vec, vec::Vec};
 use core::num::NonZero;
 use jam_codec::{Compact, Decode, Encode};
 
-mod delta;
+mod entropy;
 mod haar;
 mod quant;
-mod signmag;
+mod sample;
 mod stats;
 mod yuv;
 
 pub use self::stats::*;
-use self::{quant::*, yuv::*};
+use self::{quant::*, sample::Sample, yuv::*};
 
 /// Video encoder configuration.
 #[derive(Debug)]
@@ -85,7 +89,7 @@ enum RawVideoFrameFormat {
 /// | Transform | Haar transform (no division). |
 /// | Quantization | Scalar quantization without a deadzone. |
 /// | Motion estimation | Simple delta encoding. |
-/// | Bit encoder | Sign-magniude conversion and rANS encoder. |
+/// | Bit encoder | Zigzag conversion and rANS encoder with two contexts. |
 ///
 /// # Example
 ///
@@ -112,12 +116,10 @@ pub struct Encoder {
     width: NonZero<u16>,
     height: NonZero<u16>,
     quant: u8,
-    // Current frame.
     frame: YuvFrame,
-    // Previous frame.
-    prev_frame: YuvFrame,
-    // Output buffer.
-    buf: Vec<u8>,
+    words: WordStack,
+    header: Vec<u8>,
+    entropy_encoder: entropy::Encoder,
 }
 
 impl Encoder {
@@ -125,19 +127,19 @@ impl Encoder {
     pub fn new(width: NonZero<u16>, height: NonZero<u16>, config: Config) -> Self {
         let quant = config.quantization_level.min(MAX_QUANTIZATION_LEVEL);
         let frame = YuvFrame::new(width, height, config.chroma_subsampling, config.raw);
-        let prev_frame = frame.clone();
-        let buf = if config.raw {
-            Vec::new()
+        let words = if config.raw {
+            WordStack::default()
         } else {
-            Vec::with_capacity(32 * 1024)
+            WordStack::with_capacity(8 * 1024)
         };
         Self {
             width,
             height,
             quant,
             frame,
-            prev_frame,
-            buf,
+            words,
+            header: Vec::new(),
+            entropy_encoder: entropy::Encoder::default(),
         }
     }
 
@@ -152,18 +154,10 @@ impl Encoder {
             output.write(rgb_frame);
             return Stats::default();
         }
-        match self.frame {
-            YuvFrame::Yuv420p(ref mut frame) => {
-                let (y, u, v) = frame.as_mut_slices();
-                rgb888_to_yuv420p(rgb_frame, self.width, y, u, v);
-            }
-            YuvFrame::Yuv444p(ref mut frame) => {
-                let (y, u, v) = frame.as_mut_slices();
-                rgb888_to_yuv444p(rgb_frame, self.width, y, u, v);
-            }
-            // Raw frames are handled above.
-            YuvFrame::Dummy(..) => unreachable!(),
-        }
+        self.frame
+            .load_pixels(rgb_frame.as_chunks::<3>().0, self.width, |rgb| {
+                rgb_to_yuv(*rgb)
+            });
         self.write_frame(output)
     }
 
@@ -186,18 +180,16 @@ impl Encoder {
             output.write(indexed_rgb_frame);
             return Stats::default();
         }
-        match self.frame {
-            YuvFrame::Yuv420p(ref mut frame) => {
-                let (y, u, v) = frame.as_mut_slices();
-                rgb888_indexed8_to_yuv420p(indexed_rgb_frame, self.width, y, u, v);
-            }
-            YuvFrame::Yuv444p(ref mut frame) => {
-                let (y, u, v) = frame.as_mut_slices();
-                rgb888_indexed8_to_yuv444p(indexed_rgb_frame, self.width, y, u, v);
-            }
-            // Raw frames are handled above.
-            YuvFrame::Dummy(..) => unreachable!(),
-        }
+        let (palette, indices) = indexed_rgb_frame.split_at(3 * 256);
+        let palette = YuvPalette::new(
+            palette
+                .as_chunks::<3>()
+                .0
+                .try_into()
+                .expect("invalid palette length"),
+        );
+        self.frame
+            .load_pixels(indices, self.width, |index| palette.get(*index));
         self.write_frame(output)
     }
 
@@ -209,34 +201,42 @@ impl Encoder {
         haar::forward(u, uv_width, uv_height, self.quant);
         haar::forward(v, uv_width, uv_height, self.quant);
         timer_finish!(t_transform);
-        let t_delta = timer_start!();
-        let (y_prev, u_prev, v_prev) = self.prev_frame.as_mut_slices();
-        delta::encode(y, y_prev);
-        delta::encode(u, u_prev);
-        delta::encode(v, v_prev);
-        timer_finish!(t_delta);
-        let t_signmag = timer_start!();
-        self.buf.clear();
-        let y_stats = signmag::encode(y, &mut self.buf);
-        let u_stats = signmag::encode(u, &mut self.buf);
-        let v_stats = signmag::encode(v, &mut self.buf);
-        // Reverse to be able to read frames in normal order.
-        self.buf.reverse();
-        timer_finish!(t_signmag);
+        let t_entropy = timer_start!();
+        self.words.clear();
+        self.header.clear();
+        let y_stats = entropy::encode(
+            y,
+            &mut self.entropy_encoder,
+            &mut self.words,
+            &mut self.header,
+        );
+        let u_stats = entropy::encode(
+            u,
+            &mut self.entropy_encoder,
+            &mut self.words,
+            &mut self.header,
+        );
+        let v_stats = entropy::encode(
+            v,
+            &mut self.entropy_encoder,
+            &mut self.words,
+            &mut self.header,
+        );
+        timer_finish!(t_entropy);
         let stats = Stats {
             y: y_stats,
             u: u_stats,
             v: v_stats,
             #[cfg(all(feature = "stats", feature = "std"))]
             time: TimeStats {
-                delta: t_delta.into_duration(),
                 transform: t_transform.into_duration(),
-                signmag: t_signmag.into_duration(),
+                entropy: t_entropy.into_duration(),
                 count: 1,
             },
             count: 1,
         };
-        output.write(&self.buf[..]);
+        output.write(&self.header);
+        output.write(self.words.as_bytes());
         stats
     }
 
@@ -273,12 +273,12 @@ impl Encoder {
     /// Note that the output needs to be truncated manually when you restore the
     /// state from a checkpoint.
     pub fn checkpoint(&self) -> EncoderCheckpoint {
-        EncoderCheckpoint {
-            prev_frame: self.prev_frame.clone(),
-            width: self.width,
-            height: self.height,
-            quant: self.quant,
-        }
+        EncoderCheckpoint(Checkpoint::new(
+            self.width,
+            self.height,
+            self.quant,
+            &self.frame,
+        ))
     }
 
     /// Restore video encoder state from a checkpoint created by
@@ -287,26 +287,48 @@ impl Encoder {
     /// Panics if the checkpoint was created for an encoder with a different
     /// configuration.
     pub fn restore_from(&mut self, checkpoint: EncoderCheckpoint) {
-        assert!(
-            self.prev_frame.raw() == checkpoint.prev_frame.raw()
-                && self.quant == checkpoint.quant
-                && self.prev_frame.chroma_subsampling()
-                    == checkpoint.prev_frame.chroma_subsampling()
-                && self.width == checkpoint.width
-                && self.height == checkpoint.height
-        );
-        self.prev_frame = checkpoint.prev_frame;
+        checkpoint
+            .0
+            .restore(self.width, self.height, self.quant, &mut self.frame);
     }
 }
 
 /// Video encoder checkpoint.
 ///
 /// Holds internal encoder state.
-pub struct EncoderCheckpoint {
+pub struct EncoderCheckpoint(Checkpoint);
+
+struct Checkpoint {
     width: NonZero<u16>,
     height: NonZero<u16>,
     quant: u8,
-    prev_frame: YuvFrame,
+    raw: bool,
+    chroma_subsampling: bool,
+    previous_values: Vec<i16>,
+}
+
+impl Checkpoint {
+    fn new(width: NonZero<u16>, height: NonZero<u16>, quant: u8, frame: &YuvFrame) -> Self {
+        Self {
+            width,
+            height,
+            quant,
+            raw: frame.raw(),
+            chroma_subsampling: frame.chroma_subsampling(),
+            previous_values: frame.previous_values(),
+        }
+    }
+
+    fn restore(self, width: NonZero<u16>, height: NonZero<u16>, quant: u8, frame: &mut YuvFrame) {
+        assert!(
+            self.raw == frame.raw()
+                && self.quant == quant
+                && self.chroma_subsampling == frame.chroma_subsampling()
+                && self.width == width
+                && self.height == height
+        );
+        frame.set_previous_values(&self.previous_values);
+    }
 }
 
 errors! {
@@ -321,8 +343,8 @@ impl From<rans::InvalidRansStream> for InvalidVideoStream {
 }
 
 #[doc(hidden)]
-impl From<signmag::InvalidSignMagStream> for InvalidVideoStream {
-    fn from(_: signmag::InvalidSignMagStream) -> Self {
+impl From<entropy::InvalidEntropyStream> for InvalidVideoStream {
+    fn from(_: entropy::InvalidEntropyStream) -> Self {
         InvalidVideoStream
     }
 }
@@ -340,7 +362,8 @@ pub struct Decoder {
     height: NonZero<u16>,
     quant: u8,
     frame: YuvFrame,
-    prev_frame: YuvFrame,
+    rans_tables: entropy::Tables,
+    words: WordBuffer,
 }
 
 impl Decoder {
@@ -366,13 +389,13 @@ impl Decoder {
         let width = NonZero::new(width).ok_or(InvalidVideoStream)?;
         let height = NonZero::new(height).ok_or(InvalidVideoStream)?;
         let frame = YuvFrame::new(width, height, chroma_subsampling, raw);
-        let prev_frame = frame.clone();
         Ok(Self {
             width,
             height,
             quant,
             frame,
-            prev_frame,
+            rans_tables: entropy::Tables::default(),
+            words: WordBuffer::default(),
         })
     }
 
@@ -400,18 +423,11 @@ impl Decoder {
             return self.read_rgb888_frame_raw(input, rgb_frame);
         }
         self.read_yuv420p_frame(input)?;
-        match self.frame {
-            YuvFrame::Yuv420p(ref frame) => {
-                let (y, u, v) = frame.as_slices();
-                yuv420p_to_rgb888(y, u, v, self.width, rgb_frame);
-            }
-            YuvFrame::Yuv444p(ref frame) => {
-                let (y, u, v) = frame.as_slices();
-                yuv444p_to_rgb888(y, u, v, self.width, rgb_frame);
-            }
-            // Raw frames are handled above.
-            YuvFrame::Dummy(..) => unreachable!(),
-        }
+        self.frame.store_pixels(
+            rgb_frame.as_chunks_mut::<3>().0,
+            self.width,
+            |pixel, rgb| *pixel = rgb,
+        );
         Ok(())
     }
 
@@ -458,18 +474,11 @@ impl Decoder {
             return self.read_rgba8888_frame_raw(input, rgba_frame);
         }
         self.read_yuv420p_frame(input)?;
-        match self.frame {
-            YuvFrame::Yuv420p(ref frame) => {
-                let (y, u, v) = frame.as_slices();
-                yuv420p_to_rgba8888(y, u, v, self.width, rgba_frame);
-            }
-            YuvFrame::Yuv444p(ref frame) => {
-                let (y, u, v) = frame.as_slices();
-                yuv444p_to_rgba8888(y, u, v, self.width, rgba_frame);
-            }
-            // Raw frames are handled above.
-            YuvFrame::Dummy(..) => unreachable!(),
-        }
+        self.frame.store_pixels(
+            rgba_frame.as_chunks_mut::<4>().0,
+            self.width,
+            |pixel, [r, g, b]| *pixel = [r, g, b, u8::MAX],
+        );
         Ok(())
     }
 
@@ -517,21 +526,21 @@ impl Decoder {
     fn read_yuv420p_frame(&mut self, input: &mut impl Input) -> Result<(), InvalidVideoStream> {
         let (uv_width, uv_height) = (self.frame.uv_width(), self.frame.uv_height());
         let (y, u, v) = self.frame.as_mut_slices();
-        let (y_prev, u_prev, v_prev) = self.prev_frame.as_mut_slices();
-        // Read in reverse order: v, u, y.
-        let mut ans_input = rans::JamInputAsAnsInput(input);
-        // v
-        signmag::decode(&mut ans_input, v)?;
-        delta::decode(v, v_prev);
-        haar::backward(v, uv_width, uv_height, self.quant);
-        // u
-        signmag::decode(&mut ans_input, u)?;
-        delta::decode(u, u_prev);
-        haar::backward(u, uv_width, uv_height, self.quant);
-        // y
-        signmag::decode(&mut ans_input, y)?;
-        delta::decode(y, y_prev);
+        let y_header = entropy::decode_header(input, y.len())?;
+        let u_header = entropy::decode_header(input, u.len())?;
+        let v_header = entropy::decode_header(input, v.len())?;
+        let word_count = [&y_header, &u_header, &v_header]
+            .into_iter()
+            .map(entropy::PlaneHeader::word_count)
+            .sum();
+        self.words.read_from(input, word_count)?;
+        let mut words = self.words.reader();
+        entropy::decode(&y_header, &mut words, y, &mut self.rans_tables)?;
         haar::backward(y, self.width, self.height, self.quant);
+        entropy::decode(&u_header, &mut words, u, &mut self.rans_tables)?;
+        haar::backward(u, uv_width, uv_height, self.quant);
+        entropy::decode(&v_header, &mut words, v, &mut self.rans_tables)?;
+        haar::backward(v, uv_width, uv_height, self.quant);
         Ok(())
     }
 
@@ -544,12 +553,12 @@ impl Decoder {
     /// Note that the input needs to be rewound manually when you restore the
     /// state from a checkpoint.
     pub fn checkpoint(&self) -> DecoderCheckpoint {
-        DecoderCheckpoint {
-            prev_frame: self.prev_frame.clone(),
-            width: self.width,
-            height: self.height,
-            quant: self.quant,
-        }
+        DecoderCheckpoint(Checkpoint::new(
+            self.width,
+            self.height,
+            self.quant,
+            &self.frame,
+        ))
     }
 
     /// Restore video decoder state from a checkpoint created by
@@ -558,33 +567,23 @@ impl Decoder {
     /// Panics if the checkpoint was created for a decoder with a different
     /// configuration.
     pub fn restore_from(&mut self, checkpoint: DecoderCheckpoint) {
-        assert!(
-            self.prev_frame.raw() == checkpoint.prev_frame.raw()
-                && self.quant == checkpoint.quant
-                && self.prev_frame.chroma_subsampling()
-                    == checkpoint.prev_frame.chroma_subsampling()
-                && self.width == checkpoint.width
-                && self.height == checkpoint.height
-        );
-        self.prev_frame = checkpoint.prev_frame;
+        checkpoint
+            .0
+            .restore(self.width, self.height, self.quant, &mut self.frame);
     }
 }
 
 /// Video decoder checkpoint.
 ///
 /// Holds internal decoder state.
-pub struct DecoderCheckpoint {
-    width: NonZero<u16>,
-    height: NonZero<u16>,
-    quant: u8,
-    prev_frame: YuvFrame,
-}
+pub struct DecoderCheckpoint(Checkpoint);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ToUsize;
-    use alloc::vec;
+    use crate::video::yuv::tests::currents;
+    use alloc::{vec, vec::Vec};
     use core::ops::RangeInclusive;
     use proptest::{collection, prelude::*, sample};
 
@@ -606,9 +605,11 @@ mod tests {
             output: &mut impl Output,
         ) -> Stats {
             let (y0, u0, v0) = self.frame.as_mut_slices();
-            y0.copy_from_slice(y);
-            u0.copy_from_slice(u);
-            v0.copy_from_slice(v);
+            for (samples, values) in [(y0, y), (u0, u), (v0, v)] {
+                for (sample, value) in samples.iter_mut().zip(values) {
+                    sample.current = *value;
+                }
+            }
             self.write_frame(output)
         }
     }
@@ -643,9 +644,9 @@ mod tests {
         for [y, u, v] in frames {
             decoder.read_yuv420p_frame(&mut decoder_input).unwrap();
             let (decoded_y, decoded_u, decoded_v) = decoder.frame.as_mut_slices();
-            assert_eq!(y, decoded_y);
-            assert_eq!(u, decoded_u);
-            assert_eq!(v, decoded_v);
+            assert_eq!(y, currents(decoded_y));
+            assert_eq!(u, currents(decoded_u));
+            assert_eq!(v, currents(decoded_v));
         }
     }
 
@@ -692,11 +693,27 @@ mod tests {
                 let (u, v) = uv.split_at(uv_len.to_usize());
                 decoder.read_yuv420p_frame(&mut decoder_input).unwrap();
                 let (decoded_y, decoded_u, decoded_v) = decoder.frame.as_mut_slices();
-                assert_eq!(y, decoded_y);
-                assert_eq!(u, decoded_u);
-                assert_eq!(v, decoded_v);
+                assert_eq!(y, currents(decoded_y));
+                assert_eq!(u, currents(decoded_u));
+                assert_eq!(v, currents(decoded_v));
             }
         });
+    }
+
+    fn byte_frames(
+        width: RangeInclusive<u16>,
+        height: RangeInclusive<u16>,
+        num_frames: RangeInclusive<u32>,
+        bytes_per_pixel: usize,
+    ) -> impl Strategy<Value = (u16, u16, Vec<Vec<u8>>)> {
+        (width, height, num_frames).prop_flat_map(move |(width, height, num_frames)| {
+            let frame_len = usize::from(width) * usize::from(height) * bytes_per_pixel;
+            (
+                width..=width,
+                height..=height,
+                vec![collection::vec(any::<u8>(), frame_len); num_frames.to_usize()],
+            )
+        })
     }
 
     fn rgb_frames(
@@ -704,16 +721,72 @@ mod tests {
         height: RangeInclusive<u16>,
         num_frames: RangeInclusive<u32>,
     ) -> impl Strategy<Value = (u16, u16, Vec<Vec<u8>>)> {
-        (width, height, num_frames).prop_flat_map(|(width, height, num_frames)| {
-            (
-                width..=width,
-                height..=height,
-                vec![
-                    collection::vec(any::<u8>(), usize::from(width) * usize::from(height) * 3);
-                    num_frames.to_usize()
-                ],
-            )
-        })
+        byte_frames(width, height, num_frames, 3)
+    }
+
+    #[test]
+    fn corrupted_stream_decoding() {
+        proptest!(|(
+            (width, height, frames) in rgb_frames(1..=10, 1..=10, 1..=3),
+            config in config(),
+            corruptions in collection::vec((any::<sample::Index>(), any::<u8>()), 1..=8),
+        )| {
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let mut output = Vec::new();
+            let mut encoder = Encoder::new(width, height, config);
+            encoder.start(&mut output);
+            let header_len = output.len();
+            for frame in frames.iter() {
+                encoder.write_rgb888_frame(frame, &mut output);
+            }
+            for (index, byte) in corruptions {
+                let index = header_len + index.index(output.len() - header_len);
+                output[index] ^= byte;
+            }
+            let mut input = &output[..];
+            let Ok(mut decoder) = Decoder::new(&mut input) else {
+                return Ok(());
+            };
+            let mut rgb_frame = vec![0; usize::from(decoder.width().get()) * usize::from(decoder.height().get()) * 3];
+            while !input.is_empty() {
+                if decoder.read_rgb888_frame(&mut input, &mut rgb_frame).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn indexed_frame_encoding() {
+        proptest!(|(
+            (width, height, index_frames) in byte_frames(1..=10, 1..=10, 1..=3, 1),
+            palette in collection::vec(any::<u8>(), 3 * 256),
+            quantization_level in 0_u8..=MAX_QUANTIZATION_LEVEL,
+            chroma_subsampling in any::<bool>(),
+        )| {
+            let width = NonZero::new(width).unwrap();
+            let height = NonZero::new(height).unwrap();
+            let config = || Config {
+                quantization_level,
+                chroma_subsampling,
+                raw: false,
+            };
+            let mut indexed_encoder = Encoder::new(width, height, config());
+            let mut rgb_encoder = Encoder::new(width, height, config());
+            let mut indexed_output = Vec::new();
+            let mut rgb_output = Vec::new();
+            for indices in index_frames {
+                let indexed_frame = [palette.as_slice(), indices.as_slice()].concat();
+                let rgb_frame: Vec<u8> = indices
+                    .iter()
+                    .flat_map(|index| palette[3 * usize::from(*index)..][..3].iter().copied())
+                    .collect();
+                indexed_encoder.write_rgb888_indexed8_frame(&indexed_frame, &mut indexed_output);
+                rgb_encoder.write_rgb888_frame(&rgb_frame, &mut rgb_output);
+            }
+            assert_eq!(rgb_output, indexed_output);
+        });
     }
 
     #[test]

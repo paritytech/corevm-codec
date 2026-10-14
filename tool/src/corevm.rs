@@ -218,8 +218,7 @@ impl core::fmt::Display for DisplayStats<'_> {
         // Timing.
         let mut time = [
             ("Transform", self.stats.time.transform),
-            ("Delta", self.stats.time.delta),
-            ("rANS", self.stats.time.signmag),
+            ("Entropy", self.stats.time.entropy),
         ];
         time.sort_unstable_by_key(|(_name, duration)| *duration);
         time.reverse();
