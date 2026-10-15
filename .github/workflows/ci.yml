@@ -1,6 +1,16 @@
 ---
 name: CI
-on: [push]
+on:
+  # Run CI on push for 'master' branch and tags.
+  push:
+    branches: [main]
+    tags: ["**"]
+  # Run CI on pull request for all branches.
+  pull_request:
+    branches: ["**"]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
