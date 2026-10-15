@@ -5,7 +5,7 @@ main() {
 	git config --global --add safe.directory "$PWD"
 	cargo fmt --all --check
 	cargo clippy --workspace --all-features --all-targets --quiet -- -Dwarnings
-	cargo test --workspace
+	cargo test --workspace --release
 	wasm_build
 	wasm_test
 	./scripts/bench.sh native
