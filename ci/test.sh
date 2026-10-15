@@ -18,6 +18,8 @@ wasm_build() {
 	node js/scaffolding.js
 	tsc pkg/*.js --declaration --allowJs --emitDeclarationOnly --outDir pkg
 	typedoc
+    # Print WASM code size.
+    ls -lh pkg
 	cd ..
 }
 
