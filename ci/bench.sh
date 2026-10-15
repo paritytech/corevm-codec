@@ -20,7 +20,8 @@ polkaports_install() {
 	sudo -n apt-get -qq install -y clang-20 lld-20 llvm-20 autotools-dev nasm
     export PATH=/usr/lib/llvm-20/bin:"$PATH"
 	rustup component add rust-src
-	git clone --recurse-submodules https://github.com/paritytech/polkaports "$workdir"/polkaports
+    # polkavm 0.29.0
+	git clone --revision=8c1877e6d04c588d238317c6524f84cb6021d4d7 --recurse-submodules https://github.com/paritytech/polkaports "$workdir"/polkaports
 	cd "$workdir"/polkaports
 	env CC=clang-20 \
         CXX=clang++-20 \
