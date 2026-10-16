@@ -3,7 +3,7 @@ use rav1e::prelude::*;
 
 mod bt709;
 
-pub fn transcode(width: u16, height: u16) {
+pub fn transcode(width: u16, height: u16) -> usize {
     let mut speed_settings = SpeedSettings::from_preset(u8::MAX);
     speed_settings.rdo_lookahead_frames = 1;
     speed_settings.cdef = false;
@@ -47,9 +47,10 @@ pub fn transcode(width: u16, height: u16) {
         av1_context.send_frame(frame).expect("send_frame failed");
     }
     av1_context.flush();
+    let mut compressed_len = 0;
     loop {
         match av1_context.receive_packet() {
-            Ok(_packet) => {}
+            Ok(packet) => compressed_len += packet.data.len(),
             Err(EncoderStatus::Encoded) => {
                 // A frame was encoded without emitting a packet. This is
                 // normal, just proceed as usual.
@@ -80,4 +81,5 @@ pub fn transcode(width: u16, height: u16) {
             }
         }
     }
+    compressed_len
 }

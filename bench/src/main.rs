@@ -13,15 +13,19 @@ fn main() {
     let width = NonZero::new(320).expect("Constant is non-zero");
     let height = NonZero::new(200).expect("Constant is non-zero");
     #[cfg(feature = "corevm")]
-    transcode_corevm(width, height);
+    print_compressed_size(transcode_corevm(width, height));
     #[cfg(feature = "qoi")]
-    qoi_video::transcode(width.get(), height.get());
+    print_compressed_size(qoi_video::transcode(width.get(), height.get()));
     #[cfg(feature = "av1")]
-    av1::transcode(width.get(), height.get());
+    print_compressed_size(av1::transcode(width.get(), height.get()));
+}
+
+fn print_compressed_size(compressed_len: usize) {
+    println!("Compressed size: {} KiB", compressed_len / 1024);
 }
 
 #[cfg(feature = "corevm")]
-fn transcode_corevm(width: NonZero<u16>, height: NonZero<u16>) {
+fn transcode_corevm(width: NonZero<u16>, height: NonZero<u16>) -> usize {
     use corevm_codec::video;
     let mut config = video::Config::default();
     config.quantization_level = 4;
@@ -33,4 +37,5 @@ fn transcode_corevm(width: NonZero<u16>, height: NonZero<u16>) {
         encoder.write_rgb888_frame(frame, &mut buf);
     }
     encoder.finish(&mut buf);
+    buf.len()
 }
