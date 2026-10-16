@@ -1,3 +1,17 @@
+/// One sample of a plane and the transform coefficient of the previous frame
+/// at the same position.
+///
+/// The values of the fields depend on the stage.
+///
+/// | Stage                               | `current`         | `previous`                        |
+/// |-------------------------------------|-------------------|-----------------------------------|
+/// | Encoder, after the color conversion | YUV value         | coefficient of the previous frame |
+/// | Encoder, after `haar::forward`      | coefficient delta | coefficient                       |
+/// | Decoder, after `entropy::decode`    | coefficient delta | coefficient of the previous frame |
+/// | Decoder, after `haar::backward`     | YUV value         | coefficient                       |
+///
+/// The fields are interleaved, so that the Haar transform loads and stores
+/// both values with one 32-bit memory access (see [`PackedSample`]).
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[repr(C, align(4))]
 pub struct Sample {
@@ -5,6 +19,8 @@ pub struct Sample {
     pub previous: i16,
 }
 
+// `PackedSample` reads the memory of `Sample` as a `u32`, so the bit offsets of
+// the fields depend on the byte order.
 const CURRENT_SHIFT: u32 = if cfg!(target_endian = "little") {
     0
 } else {
@@ -12,6 +28,7 @@ const CURRENT_SHIFT: u32 = if cfg!(target_endian = "little") {
 };
 const PREVIOUS_SHIFT: u32 = 16 - CURRENT_SHIFT;
 
+/// [`Sample`] as one `u32`, for one memory access per sample instead of two.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct PackedSample(u32);
@@ -23,10 +40,14 @@ const _: () = {
 
 impl PackedSample {
     pub fn slice(samples: &[Sample]) -> &[PackedSample] {
+        // SAFETY: `Sample` and `PackedSample` have the same size and alignment,
+        // and all bit patterns are valid for both types.
         unsafe { core::slice::from_raw_parts(samples.as_ptr().cast(), samples.len()) }
     }
 
     pub fn slice_mut(samples: &mut [Sample]) -> &mut [PackedSample] {
+        // SAFETY: `Sample` and `PackedSample` have the same size and alignment,
+        // and all bit patterns are valid for both types.
         unsafe { core::slice::from_raw_parts_mut(samples.as_mut_ptr().cast(), samples.len()) }
     }
 
@@ -59,15 +80,19 @@ impl PackedSample {
     }
 }
 
+/// Two adjacent samples as one `u64`, for one load per two samples.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct PackedSamplePair(u64);
 
 impl PackedSamplePair {
     pub fn split(samples: &[PackedSample]) -> (&[PackedSample], &[Self], &[PackedSample]) {
+        // SAFETY: all bit patterns are valid for `PackedSample` and
+        // `PackedSamplePair`.
         unsafe { samples.align_to() }
     }
 
+    /// Returns the samples in memory order.
     #[inline(always)]
     pub fn samples(self) -> [PackedSample; 2] {
         let low = PackedSample(self.0 as u32);

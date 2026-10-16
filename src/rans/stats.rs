@@ -2,9 +2,9 @@
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Stats {
-    /// The number of bytes written to the output excluding the footer.
+    /// The number of bytes written to the output excluding the header.
     pub data_len: u64,
-    /// Footer size in bytes.
+    /// Header size in bytes.
     pub header_len: u32,
     /// The number of non-zero frequencies.
     pub num_freqs: u32,
@@ -13,7 +13,7 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// Returns the number of bytes written to the output including the footer.
+    /// Returns the number of bytes written to the output including the header.
     pub fn total_out(&self) -> u64 {
         self.data_len + u64::from(self.header_len)
     }

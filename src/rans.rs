@@ -1,4 +1,13 @@
 //! Range Asymmetric Numeral System (rANS) encoder/decoder.
+//!
+//! The code is based on <https://github.com/rygorous/ryg_rans>.
+//! The original paper is <https://arxiv.org/pdf/1311.2540>.
+//!
+//! This variant has a 32-bit state and 16-bit words. Each symbol writes or
+//! reads at most one word.
+//!
+//! The hot loops avoid divisions and data-dependent branches, because both are
+//! expensive under PolkaVM gas metering.
 
 use crate::errors;
 use alloc::{boxed::Box, vec, vec::Vec};
@@ -24,19 +33,31 @@ impl core::ops::AddAssign<&Stats> for Stats {
     fn add_assign(&mut self, _: &Stats) {}
 }
 
-/// Maximum input size in bytes.
+/// Maximum number of symbols in one stream. Symbol counts and the word count
+/// of a stream are `u32`.
 pub const MAX_INPUT_LEN: usize = u32::MAX as usize;
 
 // Total number of frequencies.
 pub(crate) const NUM_FREQS: usize = 256;
 // Total number of cumulative frequencies.
 const NUM_CFREQS: usize = NUM_FREQS + 1;
+// Frequencies are scaled to a sum of `2^SCALE_BITS`. 12 bits is the largest
+// scale for which a decoder table entry (8-bit symbol, 12-bit frequency - 1 and
+// 12-bit offset) fits in a `u32`.
 const SCALE_BITS: u32 = 12;
 // The sum of all frequencies.
 const SUM_FREQ: u32 = 1 << SCALE_BITS;
 const FIELD_MASK: u64 = (1 << SCALE_BITS) - 1;
 const WORD_BITS: u32 = Word::BITS;
+// The decoder reads a new word whenever its state drops below
+// `STATE_LOWER_BOUND`. For these reads to match the words that the encoder
+// wrote, the encoder state must stay within `[STATE_LOWER_BOUND, 2^32)`. The
+// upper bound also makes the state fit in a `u32` (see
+// `EncoderSymbol::quotient`).
 const STATE_LOWER_BOUND: u64 = 1 << 16;
+// Encoding a symbol with frequency `f` multiplies the state by about
+// `SUM_FREQ / f`. A state of `f << RENORMALIZATION_SHIFT` or more would reach
+// `2^32`, so the encoder first writes the low word of the state.
 const RENORMALIZATION_SHIFT: u32 = STATE_LOWER_BOUND.ilog2() - SCALE_BITS + WORD_BITS;
 
 type RawFrequencies = [u32; NUM_FREQS];
@@ -60,6 +81,11 @@ const MIN_FREQUENCY: u16 = 1;
 /// Makes their sum equal to `SUM_FREQ` and every non-zero frequency at least
 /// `MIN_FREQUENCY`. Returns normalized frequencies and a set of indices of
 /// non-zero frequencies.
+///
+/// Scaling rounds each frequency and raises it to at least `MIN_FREQUENCY`, so
+/// the sum can differ from `SUM_FREQ`. The function then adds the missing
+/// amount to the largest frequency, or removes the excess from the largest
+/// frequencies, because there the relative change is the smallest.
 fn normalize_frequencies(counts: RawFrequencies) -> (NormalizedFrequencies, FreqBitSet) {
     let total: u64 = counts.iter().copied().map(u64::from).sum();
     let mut freqs = [0; NUM_FREQS];
@@ -97,7 +123,8 @@ fn normalize_frequencies(counts: RawFrequencies) -> (NormalizedFrequencies, Freq
 
 /// Calculates cumulative frequencies from normalized ones.
 ///
-/// The first frequency is always 0 to optimize RANS encoder/decoder.
+/// Element `i` is the sum of the frequencies of the symbols before `i`, so the
+/// first element is 0.
 fn cumulative_frequencies(freqs: &NormalizedFrequencies) -> CumulativeFrequencies {
     let mut cfreqs = [0; NUM_CFREQS];
     let mut sum = 0;
@@ -108,6 +135,8 @@ fn cumulative_frequencies(freqs: &NormalizedFrequencies) -> CumulativeFrequencie
     cfreqs
 }
 
+/// Symbol frequencies, normalized to a sum of `SUM_FREQ`, or all 0 for a
+/// stream without symbols.
 pub struct FrequencyTable {
     freqs: NormalizedFrequencies,
     non_zero_freqs: FreqBitSet,
@@ -167,6 +196,8 @@ impl Decode for FrequencyTable {
     }
 }
 
+/// Encoder parameters of one symbol packed into a `u64`, so that encoding a
+/// symbol takes a single load.
 #[derive(Clone, Copy, Default)]
 struct EncoderSymbol(u64);
 
@@ -196,11 +227,20 @@ impl EncoderSymbol {
         u64::from(self.0 as u32 >> FREQUENCY_OFFSET)
     }
 
+    /// Returns `true` if the encoder must write the low word of the state
+    /// before it encodes this symbol.
     #[inline(always)]
     fn is_full(self, state: u64) -> bool {
         state >> RENORMALIZATION_SHIFT > self.frequency_minus_one()
     }
 
+    /// Computes `state / frequency` by multiplying with a precomputed
+    /// reciprocal instead of dividing (Granlund and Montgomery, _"Division by
+    /// Invariant Integers using Multiplication"_, 1994).
+    ///
+    /// This only works for `state < 2^32`. For larger states the product can
+    /// overflow a `u64` and the result can be wrong. That is why the state is
+    /// 32-bit.
     #[inline(always)]
     fn quotient(self, state: u64) -> u64 {
         let reciprocal = self.0 >> RECIPROCAL_OFFSET;
@@ -216,6 +256,8 @@ impl EncoderSymbol {
     }
 }
 
+/// rANS encoder with `TABLES` frequency tables. The caller selects the table
+/// (context) of each symbol.
 pub struct Encoder<const TABLES: usize> {
     state: u64,
     symbols: [[EncoderSymbol; NUM_FREQS]; TABLES],
@@ -231,6 +273,12 @@ impl<const TABLES: usize> Default for Encoder<TABLES> {
 }
 
 impl<const TABLES: usize> Encoder<TABLES> {
+    /// Starts a new stream with `tables`.
+    ///
+    /// Only symbols that have a non-zero frequency in `tables` may be encoded
+    /// afterwards. This function only updates the parameters of those symbols,
+    /// so any other symbol would be encoded with stale parameters from an
+    /// earlier stream.
     pub fn reset(&mut self, tables: &[FrequencyTable; TABLES]) {
         self.state = STATE_LOWER_BOUND;
         for (symbols, table) in self.symbols.iter_mut().zip(tables) {
@@ -253,6 +301,13 @@ impl<const TABLES: usize> Encoder<TABLES> {
         self.state = symbol.encode(state);
     }
 
+    /// Encodes one symbol per item. `symbol` returns the table and the symbol
+    /// of an item.
+    ///
+    /// rANS operates as a stack, so the items are encoded from last to first
+    /// for [`Decoder::pop_all`] to output them from first to last. Each symbol
+    /// writes at most one word, so one `write_window` call has space for
+    /// `WINDOW_LEN` symbols.
     #[inline(always)]
     pub fn push_all<T>(
         &mut self,
@@ -276,6 +331,7 @@ impl<const TABLES: usize> Encoder<TABLES> {
         }
     }
 
+    /// Returns the final state, which is always less than `2^32`.
     pub fn state(&self) -> u32 {
         self.state as u32
     }
@@ -292,9 +348,14 @@ impl From<jam_codec::Error> for InvalidRansStream {
     }
 }
 
+// A decoder slot contains the symbol, the frequency - 1 and the slot index
+// minus the cumulative frequency of the symbol.
 const SLOT_FREQUENCY_OFFSET: u32 = u8::BITS;
 const SLOT_OFFSET_OFFSET: u32 = SLOT_FREQUENCY_OFFSET + SCALE_BITS;
+
 pub struct DecoderTables<const TABLES: usize> {
+    /// One slot per value of `state % SUM_FREQ` for each table, so that
+    /// decoding a symbol takes a single lookup.
     slots: Box<[[u32; SUM_FREQ as usize]; TABLES]>,
 }
 
@@ -317,6 +378,10 @@ impl<const TABLES: usize> DecoderTables<TABLES> {
                 let frequency = table.freqs[symbol];
                 let (run, rest) = slots.split_at_mut(usize::from(frequency));
                 let mut entry = symbol as u32 | (u32::from(frequency - 1) << SLOT_FREQUENCY_OFFSET);
+                // Fill eight slots per iteration to reduce the number of branches.
+                //
+                // For a symbol with frequency `SUM_FREQ`, the last `wrapping_add`
+                // overflows. The overflowed value is never stored in a slot.
                 let (chunks, remainder) = run.as_chunks_mut::<8>();
                 for chunk in chunks {
                     for slot in chunk {
@@ -349,6 +414,9 @@ impl<'a, const TABLES: usize> Decoder<'a, TABLES> {
     }
 
     /// Decode individual symbol.
+    ///
+    /// Always reads the next word, but consumes it only if the state dropped
+    /// below the lower bound. This avoids a branch.
     #[inline(always)]
     fn pop(&mut self, table: usize, window: &mut ReverseWordWindow<'_>) -> u8 {
         let word = window.peek();
@@ -366,6 +434,11 @@ impl<'a, const TABLES: usize> Decoder<'a, TABLES> {
         slot as u8
     }
 
+    /// Decodes one symbol per item. `table` returns the table of an item and
+    /// `set` stores the decoded symbol in the item.
+    ///
+    /// Each symbol reads at most one word, so one `read_window` call can
+    /// decode `WINDOW_LEN` symbols.
     #[inline(always)]
     pub fn pop_all<T>(
         &mut self,
@@ -393,6 +466,9 @@ impl<'a, const TABLES: usize> Decoder<'a, TABLES> {
         });
     }
 
+    /// Returns an error unless the final state is `STATE_LOWER_BOUND`. The
+    /// encoder starts from this state, so decoding a valid stream must end
+    /// there.
     pub fn finish(self) -> Result<(), InvalidRansStream> {
         if self.state != STATE_LOWER_BOUND {
             return Err(InvalidRansStream);
@@ -439,8 +515,10 @@ pub fn encode_stream_header<const TABLES: usize>(
 }
 
 pub struct StreamHeader<const TABLES: usize> {
+    /// Final encoder state, which is the initial decoder state.
     pub state: u32,
     pub word_count: u32,
+    /// One frequency table per context.
     pub tables: [FrequencyTable; TABLES],
 }
 

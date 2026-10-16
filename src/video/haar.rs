@@ -1,3 +1,15 @@
+//! In-place 2D Haar transform, fused with quantization and delta coding.
+//!
+//! Level `k` transforms 2x2 blocks of the samples at positions that are
+//! multiples of `2^k`. The LL coefficient replaces the top-left sample of the
+//! block, and the next level transforms it again. The other coefficients, and
+//! the LL coefficient of the last level, are final. They are quantized and
+//! delta-coded against `previous`, the coefficient of the previous frame.
+//! Intermediate LL values are stored only in `current`.
+//!
+//! Each level transforms, quantizes and delta-codes in a single pass, so a
+//! level loads and stores each of its samples once.
+
 use super::{
     MAX_QUANTIZATION_LEVEL, Sample, dequantize, max_transform_level, quantize, sample::PackedSample,
 };
@@ -23,22 +35,33 @@ fn backward_odd(even: i16, odd: i16) -> i16 {
     (even << 1).wrapping_sub(odd) >> 1
 }
 
+/// Quantization shifts of one transform level. Higher frequencies get larger
+/// shifts.
 trait Quantization: Copy {
+    /// At the last level, LL is a final coefficient. At other levels, LL is
+    /// the input of the next level.
     const IS_LAST_LEVEL: bool;
 
+    /// Shift of HH, at the odd row and odd column of a 2x2 block.
     fn odd_odd(self) -> u8;
 
+    /// Shift of LH and HL, at the even row and odd column or the odd row and
+    /// even column of a 2x2 block.
     #[inline(always)]
     fn even_odd(self) -> u8 {
         self.odd_odd().saturating_sub(1)
     }
 
+    /// Shift of LL at the last level, at the even row and even column of a 2x2
+    /// block.
     #[inline(always)]
     fn last_level_even_even(self) -> u8 {
         self.even_odd().saturating_sub(1)
     }
 }
 
+/// Shifts of all levels except the last as compile-time constants,
+/// mainly done to reduce runtime register pressure.
 #[derive(Clone, Copy)]
 struct LevelQuantization<const ODD_ODD: u8>;
 
@@ -51,6 +74,8 @@ impl<const ODD_ODD: u8> Quantization for LevelQuantization<ODD_ODD> {
     }
 }
 
+/// Shifts of the last level at runtime. The last level contains few blocks, so
+/// constant shifts would only make the program larger without much benefit.
 #[derive(Clone, Copy)]
 struct LastLevelQuantization {
     odd_odd: u8,
@@ -65,8 +90,12 @@ impl Quantization for LastLevelQuantization {
     }
 }
 
+// `with_level_quantization!` has one arm per shift up to
+// `MAX_QUANTIZATION_LEVEL`.
 const _: () = assert!(MAX_QUANTIZATION_LEVEL == 14);
 
+/// Calls `$level_function` with the `LevelQuantization` of the runtime HH
+/// shift `$odd_odd`.
 macro_rules! with_level_quantization {
     ($odd_odd:expr, $level_function:ident($($argument:expr),*)) => {
         match $odd_odd {
@@ -89,6 +118,9 @@ macro_rules! with_level_quantization {
     };
 }
 
+/// Transforms and quantizes one 2x2 block `[a, b, c, d]`, with `a` and `b` in
+/// the even row and `c` and `d` in the odd row. The result contains the LL,
+/// LH, HL and HH coefficients in the same positions.
 #[inline(always)]
 fn forward_block<Q: Quantization>([a, b, c, d]: [i16; 4], quantization: Q) -> [i16; 4] {
     let (a, c) = (forward_even(a, c), forward_odd(a, c));
@@ -115,6 +147,13 @@ fn forward_output(sample: PackedSample, coefficient: i16, is_final: bool) -> Pac
     }
 }
 
+/// Transforms the 2x2 blocks of an even row and the odd row `stride` rows
+/// below it.
+///
+/// `STRIDE` is the stride as a compile-time constant, or 0 for the runtime
+/// `stride`. If the last block lacks the right column, the transform uses a
+/// copy of the left column. The coefficients of the right column are then 0
+/// and are not stored.
 #[inline(always)]
 fn forward_row_pair<Q: Quantization, const STRIDE: usize>(
     even_row: &mut [PackedSample],
@@ -153,6 +192,9 @@ fn forward_row_pair<Q: Quantization, const STRIDE: usize>(
     }
 }
 
+/// Transforms the last row of a level with an odd number of rows. The
+/// transform uses a copy of the even row as the odd row, so the HL and HH
+/// coefficients are 0 and are not stored.
 #[inline(always)]
 fn forward_row<Q: Quantization>(row: &mut [PackedSample], stride: usize, quantization: Q) {
     for row in row.chunks_mut(2 * stride) {
@@ -180,6 +222,7 @@ fn forward_level<Q: Quantization>(
         if rows.len() > odd_row_offset {
             let (even_row, odd_row) = rows.split_at_mut(odd_row_offset);
             let (even_row, odd_row) = (&mut even_row[..width], &mut odd_row[..width]);
+            // Level 0 contains most blocks, so it uses a constant stride.
             if stride == 1 {
                 forward_row_pair::<_, 1>(even_row, odd_row, stride, quantization);
             } else {
@@ -194,7 +237,8 @@ fn forward_level<Q: Quantization>(
 /// Performs in-place forward Haar transform, scalar quantization and delta
 /// encoding.
 ///
-/// `quant` is the quantization level that is passed to [`quantize`].
+/// `quant` is the [`quantize`] shift of the level 0 HH coefficients. The HH
+/// shift of each next level is 1 smaller, down to 0.
 /// The resulting coefficients are delta-encoded using the previous
 /// coefficients of each sample, which are updated with the current ones.
 pub fn forward(frame: &mut [Sample], width: NonZero<u16>, height: NonZero<u16>, quant: u8) {
@@ -262,6 +306,8 @@ fn backward_output(
     )
 }
 
+/// Inverse of [`forward_row_pair`]. The coefficients that `forward_row_pair`
+/// does not store are 0.
 #[inline(always)]
 fn backward_row_pair<Q: Quantization, const STRIDE: usize>(
     even_row: &mut [PackedSample],
@@ -305,6 +351,7 @@ fn backward_row_pair<Q: Quantization, const STRIDE: usize>(
     }
 }
 
+/// Inverse of [`forward_row`].
 #[inline(always)]
 fn backward_row<Q: Quantization>(row: &mut [PackedSample], stride: usize, quantization: Q) {
     for row in row.chunks_mut(2 * stride) {
@@ -330,6 +377,7 @@ fn backward_level<Q: Quantization>(
         if rows.len() > odd_row_offset {
             let (even_row, odd_row) = rows.split_at_mut(odd_row_offset);
             let (even_row, odd_row) = (&mut even_row[..width], &mut odd_row[..width]);
+            // Levels 0 and 1 contain most blocks, so they use constant strides.
             match stride {
                 1 => backward_row_pair::<_, 1>(even_row, odd_row, stride, quantization),
                 2 => backward_row_pair::<_, 2>(even_row, odd_row, stride, quantization),
@@ -344,7 +392,8 @@ fn backward_level<Q: Quantization>(
 /// Performs in-place delta decoding, scalar dequantization and backward Haar
 /// transform.
 ///
-/// `quant` is the quantization level that is passed to [`dequantize`].
+/// `quant` is the [`dequantize`] shift of the level 0 HH coefficients. The HH
+/// shift of each next level is 1 smaller, down to 0.
 /// The coefficients are delta-decoded using the previous coefficients of each
 /// sample, which are updated with the decoded ones.
 pub fn backward(frame: &mut [Sample], width: NonZero<u16>, height: NonZero<u16>, quant: u8) {
@@ -419,6 +468,8 @@ mod tests {
         });
     }
 
+    /// The last block of a row (width not a multiple of `2 * stride`) must
+    /// decode the same values as a full block with the same coefficients.
     fn assert_backward_remainder(values: &[i16], quantization: impl Quantization) {
         let stride = 2;
         let (even_values, odd_values) = values.split_at(8);

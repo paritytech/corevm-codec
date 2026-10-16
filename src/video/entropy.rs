@@ -1,3 +1,12 @@
+//! Entropy coding of the coefficient deltas of one plane.
+//!
+//! Each delta is coded as one rANS symbol. The symbol is the zigzag value of
+//! the delta, or [`ESCAPE_SYMBOL`] if the zigzag value is 255 or more.
+//! [`PlaneHeader::escapes`] contains the zigzag values of the escaped deltas.
+//!
+//! Each symbol uses one of two frequency tables (contexts). Context 0 is for
+//! coefficients that were 0 in the previous frame, context 1 for all others.
+
 use crate::{
     errors,
     rans::{self, DecoderTables, FrequencyTable, Stats, StreamHeader, WordReader, WordStack},
@@ -23,6 +32,8 @@ impl From<rans::InvalidRansStream> for InvalidEntropyStream {
 const ESCAPE_SYMBOL: u8 = u8::MAX;
 pub const CONTEXT_COUNT: usize = 2;
 
+/// Maps 0, -1, 1, -2, 2, ... to 0, 1, 2, 3, 4, ..., so that values with a
+/// small magnitude get small symbols.
 #[inline(always)]
 fn zigzag(value: i16) -> u16 {
     ((value << 1) ^ (value >> 15)) as u16
@@ -33,12 +44,19 @@ fn unzigzag(value: u16) -> i16 {
     ((value >> 1) as i16) ^ -((value & 1) as i16)
 }
 
+/// Returns `min(zigzag(value), ESCAPE_SYMBOL)` without a branch.
 #[inline(always)]
 fn symbol(value: i16) -> u8 {
     let zigzag = zigzag(value);
     (zigzag | u16::from(zigzag >> u8::BITS != 0).wrapping_neg()) as u8
 }
 
+/// Returns the context and the symbol of a sample after
+/// [`haar::forward`](super::haar::forward).
+///
+/// At this point `current` contains the delta and `previous` contains the new
+/// coefficient. The coefficient of the previous frame is `previous - current`,
+/// which is 0 if and only if `previous` equals `current`.
 #[inline(always)]
 fn context_and_symbol(sample: &PackedSample) -> (usize, u8) {
     let current = sample.current();
@@ -51,9 +69,12 @@ pub type Tables = DecoderTables<CONTEXT_COUNT>;
 #[derive(Decode)]
 pub struct PlaneHeader {
     stream: StreamHeader<CONTEXT_COUNT>,
+    /// Zigzag values of the escaped deltas, in sample order.
     escapes: Vec<u16>,
 }
 
+/// Counts the symbols of each context. The loop loads two samples with one
+/// `u64` load to halve the number of loads.
 #[inline(never)]
 fn symbol_counts(input: &[PackedSample]) -> [[u32; rans::NUM_FREQS]; CONTEXT_COUNT] {
     let mut counts = [[0_u32; rans::NUM_FREQS]; CONTEXT_COUNT];
@@ -80,6 +101,8 @@ fn push_samples(encoder: &mut Encoder, input: &[PackedSample], words: &mut WordS
     encoder.push_all(input, words, context_and_symbol);
 }
 
+/// Fast path for the common case of a plane without escapes. It is the loop of
+/// [`decode`] without the escape handling.
 #[inline(never)]
 fn pop_samples(
     decoder: &mut rans::Decoder<'_, CONTEXT_COUNT>,
@@ -94,6 +117,8 @@ fn pop_samples(
     );
 }
 
+/// Encodes the deltas of one plane. Appends the plane header to `header` and
+/// the rANS words to `words`.
 pub fn encode(
     input: &[Sample],
     encoder: &mut Encoder,
@@ -103,6 +128,7 @@ pub fn encode(
     assert!(input.len() <= rans::MAX_INPUT_LEN);
     let packed_input = PackedSample::slice(input);
     let counts = symbol_counts(packed_input);
+    // Escapes are rare, so collect them in a second pass only if there are any.
     let escapes = if counts
         .iter()
         .any(|counts| counts[usize::from(ESCAPE_SYMBOL)] != 0)
@@ -144,6 +170,10 @@ impl PlaneHeader {
     }
 }
 
+/// Decodes a plane header and checks its word count against `sample_count`.
+///
+/// The encoder writes at most one word per sample, so a larger word count
+/// means a corrupted stream.
 pub fn decode_header(
     input: &mut impl jam_codec::Input,
     sample_count: usize,
@@ -155,6 +185,10 @@ pub fn decode_header(
     Ok(header)
 }
 
+/// Decodes the deltas of one plane into `current`.
+///
+/// Before [`haar::backward`](super::haar::backward), `previous` contains the
+/// coefficient of the previous frame, which selects the context.
 pub fn decode(
     header: &PlaneHeader,
     words: &mut WordReader<'_>,

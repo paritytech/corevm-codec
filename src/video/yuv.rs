@@ -141,6 +141,8 @@ fn previous_values((y, u, v): (&[Sample], &[Sample], &[Sample])) -> Vec<i16> {
         .collect()
 }
 
+/// YUV values of a 256-color palette with 16 bits per component in one `u64`
+/// per color, so that the conversion of an indexed pixel is one load.
 pub struct YuvPalette([u64; 256]);
 
 impl YuvPalette {
@@ -186,7 +188,8 @@ pub fn rgb_to_yuv([r, g, b]: [u8; 3]) -> [i16; 3] {
 ///
 /// This function uses fast and reversible integer-based conversion.
 /// Any resulting out-of-range RGB values are clamped.
-/// If YUV values are out-of-range, the result is undefined.
+/// The arithmetic wraps around on `i16` overflow, so YUV values from a
+/// corrupted stream produce wrong colors instead of a panic.
 #[inline]
 pub fn yuv_to_rgb([y, u, v]: [i16; 3]) -> [u8; 3] {
     let g = y.wrapping_sub(u.wrapping_add(v) >> 2).wrapping_add(128);

@@ -193,6 +193,12 @@ impl Encoder {
         self.write_frame(output)
     }
 
+    /// Encodes the YUV samples of `self.frame` and writes the frame to
+    /// `output`.
+    ///
+    /// A frame contains the Y, U and V plane headers, followed by the rANS
+    /// words of the Y, U and V planes. Placing all words after the headers
+    /// lets the decoder read them with a single `Input::read` call.
     fn write_frame(&mut self, output: &mut impl Output) -> Stats {
         let (uv_width, uv_height) = (self.frame.uv_width(), self.frame.uv_height());
         let (y, u, v) = self.frame.as_mut_slices();
@@ -523,6 +529,8 @@ impl Decoder {
         Ok(())
     }
 
+    /// Decodes one frame into the YUV samples of `self.frame`. See
+    /// [`Encoder::write_frame`] for the frame format.
     fn read_yuv420p_frame(&mut self, input: &mut impl Input) -> Result<(), InvalidVideoStream> {
         let (uv_width, uv_height) = (self.frame.uv_width(), self.frame.uv_height());
         let (y, u, v) = self.frame.as_mut_slices();

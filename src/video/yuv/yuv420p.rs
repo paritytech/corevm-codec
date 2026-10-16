@@ -53,6 +53,11 @@ impl Yuv420pFrame {
     }
 }
 
+/// Converts one row of pixels. Each pair of pixels shares one U and one V
+/// sample, and the last pixel of a row with an odd width has its own.
+///
+/// `chroma_of_pair` and `chroma_of_last_pixel` compute the new value of a
+/// chroma sample from its current value and the chroma values of its pixels.
 #[inline(always)]
 fn pixel_row_to_yuv420p<P>(
     pixels: &[P],
@@ -85,6 +90,13 @@ fn pixel_row_to_yuv420p<P>(
     }
 }
 
+/// Converts pixels to YUV 4:2:0.
+///
+/// A chroma sample is the average of the chroma values of 2x2 pixels, or of
+/// fewer pixels at the right and bottom edges. The first row of a row pair
+/// stores the sum of each pixel pair in `current` of the chroma sample, and
+/// the second row adds its sum and divides. This avoids a separate buffer for
+/// the sums.
 #[inline(never)]
 pub fn pixels_to_yuv420p<P>(
     pixels: &[P],
