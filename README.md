@@ -6,8 +6,8 @@ Currently this includes only video codec.
 
 ## Video codec
 
-This is fast and reasonably efficient video codec optimized for RISCV.
-This codec uses YUV color model, Haar wavelet transform, scalar quantization, rANS encoder, and simple inter-frame delta encoding.
+This is fast and reasonably efficient video codec optimized for PolkaVM.
+This codec uses YUV color model, Haar wavelet transform, scalar quantization, simple inter-frame delta encoding, zigzag encoding, and rANS encoder with two contexts.
 To the best of author's knowledge this is the smallest number of stages of a video encoding pipeline that are required to get decent compression ratio without significant performance degradation.
 
 There are many [royalty-free and open source video codecs](https://developer.mozilla.org/en-US/docs/Web/Media/Guides/Formats/Video_codecs) but they tend to trade encoding speed for better compression ratio.
